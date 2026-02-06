@@ -111,7 +111,7 @@ func TestStage0HeaderAtEnd(t *testing.T) {
 	t.Setenv("ZIG_LOCAL_CACHE_DIR", filepath.Join(t.TempDir(), "zig-cache-local"))
 
 	for _, arch := range []Arch{ArchLinuxAMD64, ArchLinuxARM64} {
-		stage0, err := buildStage0(arch, BuildOptions{})
+		stage0, err := buildStage0(arch)
 		if err != nil {
 			t.Fatalf("buildStage0(%v): %v", arch, err)
 		}
@@ -180,4 +180,3 @@ func buildHelloSO(t *testing.T, arch Arch) []byte {
 	}
 	return so
 }
-

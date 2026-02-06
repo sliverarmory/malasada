@@ -37,6 +37,5 @@ stage0:
 	$(GO) generate ./...
 
 # Ensure the embedded stage0 blobs exist and are up to date.
-$(STAGE0_BINS): internal/stage0/stage0.c internal/stage0/linker.ld internal/stage0/genstage0/main.go malasada.go
+$(STAGE0_BINS): internal/stage0/stage0.c internal/stage0/linker.ld internal/stage0/genstage0/main.go
 	$(GO) generate ./...
-

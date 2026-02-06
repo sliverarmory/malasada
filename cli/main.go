@@ -13,12 +13,10 @@ func main() {
 	var (
 		outPath    string
 		exportName string
-		zigPath    string
 	)
 
 	flag.StringVar(&outPath, "o", "", "Output .bin path (default: <input>.bin)")
 	flag.StringVar(&exportName, "call-export", "", "Exported function name to call after the .so is loaded")
-	flag.StringVar(&zigPath, "zig", "", "Optional: rebuild stage0 with zig instead of using embedded prebuilt stage0 (value: path to zig)")
 	flag.Parse()
 
 	if exportName == "" {
@@ -33,9 +31,7 @@ func main() {
 		outPath = soPath + ".bin"
 	}
 
-	bin, err := malasada.ConvertSharedObject(soPath, exportName, malasada.BuildOptions{
-		ZigPath: zigPath,
-	})
+	bin, err := malasada.ConvertSharedObject(soPath, exportName)
 	if err != nil {
 		fatalf("%v", err)
 	}

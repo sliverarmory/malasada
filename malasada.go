@@ -8,8 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
-	"path/filepath"
 )
 
 // Arch is a linux architecture supported by malasada.
@@ -43,30 +41,6 @@ func archFromELFMachine(m elf.Machine) (Arch, error) {
 	}
 }
 
-func zigTarget(a Arch) (string, error) {
-	switch a {
-	case ArchLinuxAMD64:
-		return "x86_64-linux-gnu", nil
-	case ArchLinuxARM64:
-		return "aarch64-linux-gnu", nil
-	default:
-		return "", fmt.Errorf("no zig target for arch %v", a)
-	}
-}
-
-type BuildOptions struct {
-	// ZigPath forces rebuilding the stage0 loader from source using this `zig`
-	// binary. If empty, malasada uses the embedded prebuilt stage0 blobs.
-	//
-	// If the embedded blobs are missing (e.g. you haven't run `go generate`),
-	// malasada will fall back to resolving zig from PATH.
-	ZigPath string
-
-	// TempDir is where build artifacts go. If empty, uses os.MkdirTemp.
-	// Only used when rebuilding stage0 with ZigPath.
-	TempDir string
-}
-
 var (
 	errBadELF = errors.New("bad ELF")
 )
@@ -74,7 +48,7 @@ var (
 // ConvertSharedObject reads a Linux ELF shared object from soPath, patches it to
 // call exportName as the process entrypoint, and wraps it with the stage0 loader
 // to produce an executable PIC .bin blob.
-func ConvertSharedObject(soPath string, exportName string, opts BuildOptions) ([]byte, error) {
+func ConvertSharedObject(soPath string, exportName string) ([]byte, error) {
 	if exportName == "" {
 		return nil, fmt.Errorf("export name is required")
 	}
@@ -88,7 +62,7 @@ func ConvertSharedObject(soPath string, exportName string, opts BuildOptions) ([
 		return nil, err
 	}
 
-	stage0, err := buildStage0(arch, opts)
+	stage0, err := buildStage0(arch)
 	if err != nil {
 		return nil, err
 	}
@@ -122,12 +96,6 @@ var stage0LinuxAMD64Prebuilt []byte
 //go:embed internal/stage0/stage0_linux_arm64.bin
 var stage0LinuxARM64Prebuilt []byte
 
-//go:embed internal/stage0/stage0.c
-var stage0CSrc string
-
-//go:embed internal/stage0/linker.ld
-var stage0LinkerLDSrc string
-
 func patchStage0PayloadLen(stage0 []byte, payloadLen uint64) error {
 	// The stage0 linker script forces the msda header to the end of the extracted
 	// .text. We enforce that invariant so we can append the payload bytes directly
@@ -150,111 +118,21 @@ func patchStage0PayloadLen(stage0 []byte, payloadLen uint64) error {
 	return nil
 }
 
-func buildStage0(arch Arch, opts BuildOptions) ([]byte, error) {
-	// Default path: use embedded prebuilt stage0 (no zig needed at runtime).
-	// If opts.ZigPath is set, we treat that as an explicit request to rebuild
-	// from source.
-	if opts.ZigPath == "" {
-		var prebuilt []byte
-		switch arch {
-		case ArchLinuxAMD64:
-			prebuilt = stage0LinuxAMD64Prebuilt
-		case ArchLinuxARM64:
-			prebuilt = stage0LinuxARM64Prebuilt
-		}
-		if len(prebuilt) > 0 {
-			stage0 := make([]byte, len(prebuilt))
-			copy(stage0, prebuilt)
-			return stage0, nil
-		}
+func buildStage0(arch Arch) ([]byte, error) {
+	var prebuilt []byte
+	switch arch {
+	case ArchLinuxAMD64:
+		prebuilt = stage0LinuxAMD64Prebuilt
+	case ArchLinuxARM64:
+		prebuilt = stage0LinuxARM64Prebuilt
+	default:
+		return nil, fmt.Errorf("unsupported arch %v", arch)
 	}
-
-	zig := opts.ZigPath
-	if zig == "" {
-		p, err := exec.LookPath("zig")
-		if err != nil {
-			return nil, fmt.Errorf("zig not found in PATH")
-		}
-		zig = p
+	if len(prebuilt) == 0 {
+		return nil, fmt.Errorf("missing embedded stage0 for %v (run `go generate ./...`)", arch)
 	}
-	target, err := zigTarget(arch)
-	if err != nil {
-		return nil, err
-	}
-
-	tmpDir := opts.TempDir
-	var cleanup func()
-	if tmpDir == "" {
-		d, err := os.MkdirTemp("", "malasada-stage0-*")
-		if err != nil {
-			return nil, err
-		}
-		tmpDir = d
-		cleanup = func() { _ = os.RemoveAll(d) }
-	} else {
-		cleanup = func() {}
-	}
-	defer cleanup()
-
-	stage0C := filepath.Join(tmpDir, "stage0.c")
-	linkerLD := filepath.Join(tmpDir, "linker.ld")
-
-	if err := os.WriteFile(stage0C, []byte(stage0CSrc), 0o644); err != nil {
-		return nil, err
-	}
-	if err := os.WriteFile(linkerLD, []byte(stage0LinkerLDSrc), 0o644); err != nil {
-		return nil, err
-	}
-
-	elfOut := filepath.Join(tmpDir, "stage0.elf")
-	binOut := filepath.Join(tmpDir, "stage0.bin")
-
-	// Build the freestanding stage0 ELF.
-	//
-	// Notes:
-	// - We keep everything in .text and extract only that section as a flat blob.
-	// - We use a custom linker script to force _start first and the msda header last.
-	cmd := exec.Command(zig, "cc",
-		"-target", target,
-		"-ffreestanding", "-nostdlib",
-		"-fno-sanitize=all",
-		"-fno-stack-protector",
-		"-fno-asynchronous-unwind-tables",
-		"-fno-unwind-tables",
-		"-ffunction-sections", "-fdata-sections",
-		"-Wl,--gc-sections",
-		"-Wl,--build-id=none",
-		"-Wl,-T,"+linkerLD,
-		"-Oz",
-		"-o", elfOut,
-		stage0C,
-	)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("zig cc stage0: %w", err)
-	}
-
-	// Extract .text as a raw byte blob.
-	cmd = exec.Command(zig, "objcopy",
-		"-O", "binary",
-		"-j", ".text",
-		elfOut,
-		binOut,
-	)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	if err := cmd.Run(); err != nil {
-		return nil, fmt.Errorf("zig objcopy stage0: %w", err)
-	}
-
-	stage0, err := os.ReadFile(binOut)
-	if err != nil {
-		return nil, err
-	}
-	if len(stage0) == 0 {
-		return nil, fmt.Errorf("stage0 build produced empty blob")
-	}
+	stage0 := make([]byte, len(prebuilt))
+	copy(stage0, prebuilt)
 	return stage0, nil
 }
 

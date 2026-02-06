@@ -59,10 +59,10 @@ If you edit `internal/stage0/stage0.c` or `internal/stage0/linker.ld`, regenerat
 go generate ./...
 ```
 
-By default, the CLI uses the embedded blobs and does not need Zig at runtime. If you want to force rebuilding stage0 at runtime (debugging), pass:
+The CLI always uses the embedded `stage0` blobs (no Zig needed at runtime). To change `stage0`, edit `internal/stage0/stage0.c` and re-run:
 
 ```bash
-./malasada --zig /path/to/zig --call-export Hello -o /tmp/hello.bin /tmp/hello.so
+go generate ./...
 ```
 
 ## Docker Test Harness
@@ -81,4 +81,3 @@ docker buildx build --platform linux/arm64 -f testdata/Dockerfile .
 - This is not a general-purpose in-process reflective `dlopen()`. The current approach does an exec-like handoff into the system dynamic loader and does not return to the caller.
 - The export passed to `--call-export` must be present in `.dynsym` (i.e., actually exported).
 - The `.so` patcher currently repurposes an existing program header (`PT_NOTE` preferred, otherwise `PT_GNU_EH_FRAME`) to create a new executable `PT_LOAD` segment for the entry stub.
-
