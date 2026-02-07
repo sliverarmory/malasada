@@ -2,6 +2,7 @@ package malasada
 
 import (
 	"bytes"
+	"crypto/rand"
 	"debug/elf"
 	_ "embed"
 	"encoding/binary"
@@ -99,7 +100,42 @@ func ConvertSharedObject(soPath string, exportName string, compress bool) ([]byt
 // stage0 build + patching
 // -----------------------------
 
-var msdaMagic = []byte("MALASADA")
+const msdaMagicLen = 8
+
+var msdaMagic = newMSDAMagic()
+
+func newMSDAMagic() []byte {
+	const letters = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
+	if len(letters) != 52 {
+		// If this ever changes, the rejection-sampling below must be updated.
+		panic("msda magic: unexpected alphabet length")
+	}
+
+	// 52*4 is the largest multiple of 52 < 256, so we can map bytes uniformly.
+	const cutoff = 52 * 4 // 208
+
+	out := make([]byte, msdaMagicLen)
+	out[0] = 'M'
+	for i := 1; i < len(out); {
+		var buf [32]byte
+		if _, err := rand.Read(buf[:]); err != nil {
+			// Extremely unlikely; fall back to the historical magic.
+			copy(out, []byte("MALASADA"))
+			return out
+		}
+		for _, b := range buf {
+			if b >= cutoff {
+				continue
+			}
+			out[i] = letters[int(b)%len(letters)]
+			i++
+			if i == len(out) {
+				break
+			}
+		}
+	}
+	return out
+}
 
 //go:generate go run ./internal/stage0/genstage0 -out internal/stage0
 
@@ -124,16 +160,23 @@ func patchStage0PayloadLen(stage0 []byte, payloadLen uint64) error {
 		return fmt.Errorf("stage0 too small")
 	}
 
-	off := bytes.LastIndex(stage0, msdaMagic)
-	if off < 0 {
-		return fmt.Errorf("stage0 missing msda header")
+	off := len(stage0) - headerSize
+	hdr := stage0[off:]
+	if binary.LittleEndian.Uint32(hdr[8:12]) != 1 {
+		return fmt.Errorf("stage0 has unexpected msda version")
 	}
-	if off+headerSize != len(stage0) {
-		return fmt.Errorf("stage0 msda header is not at end (off=%d len=%d)", off, len(stage0))
+	arch := binary.LittleEndian.Uint32(hdr[12:16])
+	if arch != 1 && arch != 2 {
+		return fmt.Errorf("stage0 has unexpected msda arch")
 	}
 
+	if len(msdaMagic) != 8 {
+		return fmt.Errorf("internal error: msdaMagic length is %d, want 8", len(msdaMagic))
+	}
+	copy(hdr[0:8], msdaMagic)
+
 	// payload_len is at offset 16 from magic start.
-	binary.LittleEndian.PutUint64(stage0[off+16:], payloadLen)
+	binary.LittleEndian.PutUint64(hdr[16:24], payloadLen)
 	return nil
 }
 

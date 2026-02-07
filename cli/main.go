@@ -18,7 +18,8 @@ func main() {
 
 	flag.StringVar(&outPath, "o", "", "Output .bin path (default: <input>.bin)")
 	flag.StringVar(&exportName, "call-export", malasada.DefaultCallExport, "Exported function name to call after the .so is loaded")
-	flag.BoolVar(&compress, "compression", false, "Compress the embedded .so payload with aPLib (default: false)")
+	flag.BoolVar(&compress, "compress", false, "Compress the embedded .so payload with aPLib (default: false)")
+	flag.BoolVar(&compress, "compression", false, "Alias for -compress")
 	flag.Parse()
 
 	if flag.NArg() != 1 {

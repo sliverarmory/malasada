@@ -3,6 +3,7 @@ package malasada
 import (
 	"bytes"
 	"debug/elf"
+	"encoding/binary"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -116,12 +117,39 @@ func TestStage0HeaderAtEnd(t *testing.T) {
 		if err != nil {
 			t.Fatalf("buildStage0(%v): %v", arch, err)
 		}
-		if bytes.LastIndex(stage0, msdaMagic) != len(stage0)-(8+4+4+8) {
-			t.Fatalf("stage0(%v): msda header not at end", arch)
+
+		const headerSize = 8 + 4 + 4 + 8
+		if len(stage0) < headerSize {
+			t.Fatalf("stage0(%v): too small", arch)
 		}
-		// Should be patchable without error.
+		hdr := stage0[len(stage0)-headerSize:]
+		if binary.LittleEndian.Uint32(hdr[8:12]) != 1 {
+			t.Fatalf("stage0(%v): unexpected msda version", arch)
+		}
+		wantArchID := uint32(0)
+		switch arch {
+		case ArchLinuxAMD64:
+			wantArchID = 1
+		case ArchLinuxARM64:
+			wantArchID = 2
+		default:
+			t.Fatalf("unsupported arch %v", arch)
+		}
+		if gotArchID := binary.LittleEndian.Uint32(hdr[12:16]); gotArchID != wantArchID {
+			t.Fatalf("stage0(%v): arch id mismatch: got %d want %d", arch, gotArchID, wantArchID)
+		}
+
+		// Should be patchable without error (patches both magic and payload_len).
 		if err := patchStage0PayloadLen(stage0, 123); err != nil {
 			t.Fatalf("patchStage0PayloadLen(%v): %v", arch, err)
+		}
+
+		hdr = stage0[len(stage0)-headerSize:]
+		if got := binary.LittleEndian.Uint64(hdr[16:24]); got != 123 {
+			t.Fatalf("stage0(%v): payload_len mismatch: got %d want %d", arch, got, 123)
+		}
+		if !bytes.Equal(hdr[0:8], msdaMagic) {
+			t.Fatalf("stage0(%v): magic mismatch after patch", arch)
 		}
 	}
 }
