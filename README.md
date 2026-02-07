@@ -75,9 +75,3 @@ Examples:
 docker buildx build --platform linux/amd64 -f testdata/Dockerfile .
 docker buildx build --platform linux/arm64 -f testdata/Dockerfile .
 ```
-
-## Notes / Limitations
-
-- This is not a general-purpose in-process reflective `dlopen()`. The current approach does an exec-like handoff into the system dynamic loader and does not return to the caller.
-- `--call-export` defaults to `StartW`. The export must be present in `.dynsym` (i.e., actually exported).
-- The `.so` patcher currently repurposes an existing program header (`PT_NOTE` preferred, otherwise `PT_GNU_EH_FRAME`) to create a new executable `PT_LOAD` segment for the entry stub.
