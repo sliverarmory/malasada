@@ -1,0 +1,301 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  RELEASE_VERSION: ${{ github.ref_name }}
+  BINARY_NAME: malasada
+
+jobs:
+  stage0:
+    name: Generate stage0 (zig)
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - name: Check Out Code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Install Zig
+        run: brew install zig
+
+      - name: Generate Embedded stage0
+        run: go generate ./...
+
+      - name: Verify stage0 Binaries
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f internal/stage0/stage0_linux_amd64.bin
+          test -f internal/stage0/stage0_linux_arm64.bin
+
+      - name: Upload stage0 Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: stage0-bins
+          path: |
+            internal/stage0/stage0_linux_amd64.bin
+            internal/stage0/stage0_linux_arm64.bin
+          if-no-files-found: error
+          retention-days: 5
+
+  build-linux:
+    name: Build CLI (linux/${{ matrix.goarch }})
+    needs: stage0
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - name: Check Out Code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Download stage0 Artifacts
+        uses: actions/download-artifact@v5
+        with:
+          name: stage0-bins
+          path: .stage0-artifact
+
+      - name: Install stage0 Artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f internal/stage0/stage0_linux_amd64.bin internal/stage0/stage0_linux_arm64.bin
+
+          bin_amd64="$(find .stage0-artifact -type f -name 'stage0_linux_amd64.bin' -print -quit)"
+          bin_arm64="$(find .stage0-artifact -type f -name 'stage0_linux_arm64.bin' -print -quit)"
+
+          test -n "${bin_amd64}"
+          test -n "${bin_arm64}"
+
+          cp "${bin_amd64}" internal/stage0/stage0_linux_amd64.bin
+          cp "${bin_arm64}" internal/stage0/stage0_linux_arm64.bin
+
+          test -f internal/stage0/stage0_linux_amd64.bin
+          test -f internal/stage0/stage0_linux_arm64.bin
+
+      - name: Go Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          output="dist/${BINARY_NAME}_linux-${{ matrix.goarch }}"
+          CGO_ENABLED=0 GOOS=linux GOARCH=${{ matrix.goarch }} go build \
+            -trimpath \
+            -ldflags "-s -w" \
+            -o "${output}" \
+            ./cli
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-linux-${{ matrix.goarch }}
+          path: dist/${{ env.BINARY_NAME }}_linux-${{ matrix.goarch }}
+          if-no-files-found: error
+          retention-days: 5
+
+  build-darwin:
+    name: Build CLI (darwin/${{ matrix.goarch }})
+    needs: stage0
+    runs-on: macos-14
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - name: Check Out Code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Download stage0 Artifacts
+        uses: actions/download-artifact@v5
+        with:
+          name: stage0-bins
+          path: .stage0-artifact
+
+      - name: Install stage0 Artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f internal/stage0/stage0_linux_amd64.bin internal/stage0/stage0_linux_arm64.bin
+
+          bin_amd64="$(find .stage0-artifact -type f -name 'stage0_linux_amd64.bin' -print -quit)"
+          bin_arm64="$(find .stage0-artifact -type f -name 'stage0_linux_arm64.bin' -print -quit)"
+
+          test -n "${bin_amd64}"
+          test -n "${bin_arm64}"
+
+          cp "${bin_amd64}" internal/stage0/stage0_linux_amd64.bin
+          cp "${bin_arm64}" internal/stage0/stage0_linux_arm64.bin
+
+          test -f internal/stage0/stage0_linux_amd64.bin
+          test -f internal/stage0/stage0_linux_arm64.bin
+
+      - name: Go Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          output="dist/${BINARY_NAME}_darwin-${{ matrix.goarch }}"
+          CGO_ENABLED=0 GOOS=darwin GOARCH=${{ matrix.goarch }} go build \
+            -trimpath \
+            -ldflags "-s -w" \
+            -o "${output}" \
+            ./cli
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-darwin-${{ matrix.goarch }}
+          path: dist/${{ env.BINARY_NAME }}_darwin-${{ matrix.goarch }}
+          if-no-files-found: error
+          retention-days: 5
+
+  build-windows:
+    name: Build CLI (windows/${{ matrix.goarch }})
+    needs: stage0
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        goarch: [amd64, arm64]
+    steps:
+      - name: Check Out Code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Download stage0 Artifacts
+        uses: actions/download-artifact@v5
+        with:
+          name: stage0-bins
+          path: .stage0-artifact
+
+      - name: Install stage0 Artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          rm -f internal/stage0/stage0_linux_amd64.bin internal/stage0/stage0_linux_arm64.bin
+
+          bin_amd64="$(find .stage0-artifact -type f -name 'stage0_linux_amd64.bin' -print -quit)"
+          bin_arm64="$(find .stage0-artifact -type f -name 'stage0_linux_arm64.bin' -print -quit)"
+
+          test -n "${bin_amd64}"
+          test -n "${bin_arm64}"
+
+          cp "${bin_amd64}" internal/stage0/stage0_linux_amd64.bin
+          cp "${bin_arm64}" internal/stage0/stage0_linux_arm64.bin
+
+          test -f internal/stage0/stage0_linux_amd64.bin
+          test -f internal/stage0/stage0_linux_arm64.bin
+
+      - name: Go Build
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          output="dist/${BINARY_NAME}_windows-${{ matrix.goarch }}.exe"
+          CGO_ENABLED=0 GOOS=windows GOARCH=${{ matrix.goarch }} go build \
+            -trimpath \
+            -ldflags "-s -w" \
+            -o "${output}" \
+            ./cli
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-windows-${{ matrix.goarch }}
+          path: dist/${{ env.BINARY_NAME }}_windows-${{ matrix.goarch }}.exe
+          if-no-files-found: error
+          retention-days: 5
+
+  tagged-release:
+    name: Tagged Release
+    if: github.ref_type == 'tag' && startsWith(github.ref_name, 'v')
+    needs:
+      - stage0
+      - build-linux
+      - build-darwin
+      - build-windows
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check Out Code
+        uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - name: Collect Build Artifacts
+        uses: actions/download-artifact@v5
+        with:
+          path: release
+          pattern: build-*
+          merge-multiple: true
+
+      - name: Collect stage0 Binaries
+        uses: actions/download-artifact@v5
+        with:
+          name: stage0-bins
+          path: release
+
+      - name: Publish Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ env.RELEASE_VERSION }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          mapfile -t release_files < <(find release -type f -print)
+          if [ ${#release_files[@]} -eq 0 ]; then
+            echo "No release artifacts found in release/" >&2
+            exit 1
+          fi
+
+          if gh release view "${TAG_NAME}" >/dev/null 2>&1; then
+            gh release upload "${TAG_NAME}" "${release_files[@]}" --clobber
+          else
+            gh release create "${TAG_NAME}" \
+              --title "${TAG_NAME}" \
+              --generate-notes \
+              "${release_files[@]}"
+          fi
+
