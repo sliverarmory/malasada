@@ -8,6 +8,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+
+	"github.com/sliverarmory/malasada/internal/aplib"
 )
 
 // Arch is a linux architecture supported by malasada.
@@ -52,7 +54,7 @@ const DefaultCallExport = "StartW"
 // ConvertSharedObject reads a Linux ELF shared object from soPath, patches it to
 // call exportName as the process entrypoint, and wraps it with the stage0 loader
 // to produce an executable PIC .bin blob.
-func ConvertSharedObject(soPath string, exportName string) ([]byte, error) {
+func ConvertSharedObject(soPath string, exportName string, compress bool) ([]byte, error) {
 	if exportName == "" {
 		exportName = DefaultCallExport
 	}
@@ -71,17 +73,25 @@ func ConvertSharedObject(soPath string, exportName string) ([]byte, error) {
 		return nil, err
 	}
 
+	payload := patchedSO
+	if compress {
+		payload, err = aplib.PackSafe(patchedSO)
+		if err != nil {
+			return nil, err
+		}
+	}
+
 	stage0, err := buildStage0(arch)
 	if err != nil {
 		return nil, err
 	}
-	if err := patchStage0PayloadLen(stage0, uint64(len(patchedSO))); err != nil {
+	if err := patchStage0PayloadLen(stage0, uint64(len(payload))); err != nil {
 		return nil, err
 	}
 
-	out := make([]byte, 0, len(stage0)+len(patchedSO))
+	out := make([]byte, 0, len(stage0)+len(payload))
 	out = append(out, stage0...)
-	out = append(out, patchedSO...)
+	out = append(out, payload...)
 	return out, nil
 }
 
@@ -173,10 +183,10 @@ const (
 	dtNull   = 0
 	dtFlags1 = 0x6ffffffb
 
-	dtInit          = 12
-	dtInitArray     = 25
-	dtInitArraySz   = 27
-	dtPreinitArray  = 32
+	dtInit           = 12
+	dtInitArray      = 25
+	dtInitArraySz    = 27
+	dtPreinitArray   = 32
 	dtPreinitArraySz = 33
 )
 
@@ -625,11 +635,11 @@ func extractInitVaddrs(so []byte, phdrs []elf64Phdr, dynPh elf64Phdr) ([]uint64,
 	dyn := so[dynPh.off : dynPh.off+dynPh.filesz]
 
 	var (
-		initVaddr          uint64
-		preinitArrayVaddr  uint64
-		preinitArraySz     uint64
-		initArrayVaddr     uint64
-		initArraySz        uint64
+		initVaddr         uint64
+		preinitArrayVaddr uint64
+		preinitArraySz    uint64
+		initArrayVaddr    uint64
+		initArraySz       uint64
 	)
 
 	for off := 0; off+16 <= len(dyn); off += 16 {
@@ -860,10 +870,10 @@ func makeStubARM64(stubVaddr uint64, exportVaddr uint64, initVaddrs []uint64) []
 	// x22 = argv (points to argv[0])
 	// x23 = envp
 	words = append(words,
-		makeLdrImm64(rdX21, 31, 0),       // ldr x21, [sp]
-		makeAddImm64(rdX22, 31, 8),       // add x22, sp, #8
+		makeLdrImm64(rdX21, 31, 0),                // ldr x21, [sp]
+		makeAddImm64(rdX22, 31, 8),                // add x22, sp, #8
 		makeAddRegShift64(rdX23, rdX22, rdX21, 3), // add x23, x22, x21, lsl #3
-		makeAddImm64(rdX23, rdX23, 8),    // add x23, x23, #8 (skip argv NULL)
+		makeAddImm64(rdX23, rdX23, 8),             // add x23, x23, #8 (skip argv NULL)
 	)
 
 	// Call init functions (DT_PREINIT_ARRAY/DT_INIT/DT_INIT_ARRAY).

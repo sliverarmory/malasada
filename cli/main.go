@@ -13,10 +13,12 @@ func main() {
 	var (
 		outPath    string
 		exportName string
+		compress   bool
 	)
 
 	flag.StringVar(&outPath, "o", "", "Output .bin path (default: <input>.bin)")
 	flag.StringVar(&exportName, "call-export", malasada.DefaultCallExport, "Exported function name to call after the .so is loaded")
+	flag.BoolVar(&compress, "compression", false, "Compress the embedded .so payload with aPLib (default: false)")
 	flag.Parse()
 
 	if flag.NArg() != 1 {
@@ -28,7 +30,7 @@ func main() {
 		outPath = soPath + ".bin"
 	}
 
-	bin, err := malasada.ConvertSharedObject(soPath, exportName)
+	bin, err := malasada.ConvertSharedObject(soPath, exportName, compress)
 	if err != nil {
 		_, _ = fmt.Fprintf(os.Stderr, "%v\n", err)
 		os.Exit(1)

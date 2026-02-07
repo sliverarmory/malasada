@@ -33,6 +33,9 @@ go build -buildmode=c-shared -o /tmp/hello.so ./testdata/hello
 # Convert .so -> .bin (call the exported symbol "Hello")
 ./malasada --call-export Hello -o /tmp/hello.bin /tmp/hello.so
 
+# Optional: compress the embedded payload (stage0 will depack before loading)
+./malasada --compress --call-export Hello -o /tmp/hello.compressed.bin /tmp/hello.so
+
 # Build the runner (PIC shellcode executor) with zig cc
 zig cc -O2 -o /tmp/runner ./testdata/runner/runner.c
 

@@ -318,6 +318,302 @@ __attribute__((section(".msda"), used, aligned(1))) static volatile struct msda_
 };
 
 // -----------------------------
+// Optional aPLib depacker (AP32 safe header)
+// -----------------------------
+
+#define AP32_SAFE_TAG0 'A'
+#define AP32_SAFE_TAG1 'P'
+#define AP32_SAFE_TAG2 '3'
+#define AP32_SAFE_TAG3 '2'
+#define AP32_SAFE_HEADER_SIZE 24u
+
+#ifndef APLIB_ERROR
+#define APLIB_ERROR ((unsigned int)(-1))
+#endif
+
+static inline uint32_t u32le(const uint8_t *p) {
+  return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+static inline int is_ap32_safe(const uint8_t *p, uint64_t n) {
+  if (n < 4) return 0;
+  return p[0] == AP32_SAFE_TAG0 && p[1] == AP32_SAFE_TAG1 && p[2] == AP32_SAFE_TAG2 && p[3] == AP32_SAFE_TAG3;
+}
+
+/* aPLib "safe" depacker (bounds-checked), adapted from Joergen Ibsen's depacks.c. */
+struct APDSSTATE {
+  const unsigned char *source;
+  unsigned int srclen;
+  unsigned char *destination;
+  unsigned int dstlen;
+  unsigned int tag;
+  unsigned int bitcount;
+};
+
+static int aP_getbit_safe(struct APDSSTATE *ud, unsigned int *result) {
+  unsigned int bit;
+  if (!ud->bitcount--) {
+    if (!ud->srclen--) {
+      return 0;
+    }
+    ud->tag = *ud->source++;
+    ud->bitcount = 7;
+  }
+  bit = (ud->tag >> 7) & 0x01;
+  ud->tag <<= 1;
+  *result = bit;
+  return 1;
+}
+
+static int aP_getgamma_safe(struct APDSSTATE *ud, unsigned int *result) {
+  unsigned int bit;
+  unsigned int v = 1;
+  do {
+    if (!aP_getbit_safe(ud, &bit)) {
+      return 0;
+    }
+    if (v & 0x80000000) {
+      return 0;
+    }
+    v = (v << 1) + bit;
+    if (!aP_getbit_safe(ud, &bit)) {
+      return 0;
+    }
+  } while (bit);
+  *result = v;
+  return 1;
+}
+
+static unsigned int aP_depack_safe(const void *source, unsigned int srclen, void *destination, unsigned int dstlen) {
+  struct APDSSTATE ud;
+  unsigned int offs, len, R0, LWM, bit;
+  int done;
+  int i;
+
+  if (!source || !destination) {
+    return APLIB_ERROR;
+  }
+
+  ud.source = (const unsigned char *)source;
+  ud.srclen = srclen;
+  ud.destination = (unsigned char *)destination;
+  ud.dstlen = dstlen;
+  ud.bitcount = 0;
+
+  R0 = (unsigned int)-1;
+  LWM = 0;
+  done = 0;
+
+  if (!ud.srclen-- || !ud.dstlen--) {
+    return APLIB_ERROR;
+  }
+  *ud.destination++ = *ud.source++;
+
+  while (!done) {
+    if (!aP_getbit_safe(&ud, &bit)) {
+      return APLIB_ERROR;
+    }
+
+    if (bit) {
+      if (!aP_getbit_safe(&ud, &bit)) {
+        return APLIB_ERROR;
+      }
+
+      if (bit) {
+        if (!aP_getbit_safe(&ud, &bit)) {
+          return APLIB_ERROR;
+        }
+
+        if (bit) {
+          offs = 0;
+
+          for (i = 4; i; i--) {
+            if (!aP_getbit_safe(&ud, &bit)) {
+              return APLIB_ERROR;
+            }
+            offs = (offs << 1) + bit;
+          }
+
+          if (offs) {
+            if (offs > (dstlen - ud.dstlen)) {
+              return APLIB_ERROR;
+            }
+
+            if (!ud.dstlen--) {
+              return APLIB_ERROR;
+            }
+
+            *ud.destination = *(ud.destination - offs);
+            ud.destination++;
+          } else {
+            if (!ud.dstlen--) {
+              return APLIB_ERROR;
+            }
+
+            *ud.destination++ = 0x00;
+          }
+
+          LWM = 0;
+        } else {
+          if (!ud.srclen--) {
+            return APLIB_ERROR;
+          }
+
+          offs = *ud.source++;
+
+          len = 2 + (offs & 0x0001);
+
+          offs >>= 1;
+
+          if (offs) {
+            if (offs > (dstlen - ud.dstlen)) {
+              return APLIB_ERROR;
+            }
+
+            if (len > ud.dstlen) {
+              return APLIB_ERROR;
+            }
+
+            ud.dstlen -= len;
+
+            for (; len; len--) {
+              *ud.destination = *(ud.destination - offs);
+              ud.destination++;
+            }
+          } else {
+            done = 1;
+          }
+
+          R0 = offs;
+          LWM = 1;
+        }
+      } else {
+        if (!aP_getgamma_safe(&ud, &offs)) {
+          return APLIB_ERROR;
+        }
+
+        if ((LWM == 0) && (offs == 2)) {
+          offs = R0;
+
+          if (!aP_getgamma_safe(&ud, &len)) {
+            return APLIB_ERROR;
+          }
+
+          if (offs > (dstlen - ud.dstlen)) {
+            return APLIB_ERROR;
+          }
+
+          if (len > ud.dstlen) {
+            return APLIB_ERROR;
+          }
+
+          ud.dstlen -= len;
+
+          for (; len; len--) {
+            *ud.destination = *(ud.destination - offs);
+            ud.destination++;
+          }
+        } else {
+          if (LWM == 0) {
+            offs -= 3;
+          } else {
+            offs -= 2;
+          }
+
+          if (offs > 0x00fffffe) {
+            return APLIB_ERROR;
+          }
+
+          if (!ud.srclen--) {
+            return APLIB_ERROR;
+          }
+
+          offs <<= 8;
+          offs += *ud.source++;
+
+          if (!aP_getgamma_safe(&ud, &len)) {
+            return APLIB_ERROR;
+          }
+
+          if (offs >= 32000) {
+            len++;
+          }
+          if (offs >= 1280) {
+            len++;
+          }
+          if (offs < 128) {
+            len += 2;
+          }
+
+          if (offs > (dstlen - ud.dstlen)) {
+            return APLIB_ERROR;
+          }
+
+          if (len > ud.dstlen) {
+            return APLIB_ERROR;
+          }
+
+          ud.dstlen -= len;
+
+          for (; len; len--) {
+            *ud.destination = *(ud.destination - offs);
+            ud.destination++;
+          }
+
+          R0 = offs;
+        }
+
+        LWM = 1;
+      }
+    } else {
+      if (!ud.srclen-- || !ud.dstlen--) {
+        return APLIB_ERROR;
+      }
+      *ud.destination++ = *ud.source++;
+      LWM = 0;
+    }
+  }
+
+  return (unsigned int)(ud.destination - (unsigned char *)destination);
+}
+
+static int depack_ap32_safe(const uint8_t *src, uint64_t src_len, uint8_t **out_buf, uint64_t *out_len) {
+  if (src_len < AP32_SAFE_HEADER_SIZE) {
+    return 0;
+  }
+
+  uint32_t header_size = u32le(src + 4);
+  uint32_t packed_size = u32le(src + 8);
+  uint32_t orig_size = u32le(src + 16);
+
+  if (header_size < AP32_SAFE_HEADER_SIZE || (uint64_t)header_size > src_len) {
+    return 0;
+  }
+  if ((uint64_t)header_size + (uint64_t)packed_size > src_len) {
+    return 0;
+  }
+  if (orig_size == 0 || orig_size > (256u * 1024u * 1024u)) {
+    return 0;
+  }
+
+  uint8_t *dst = (uint8_t *)sys_mmap(NULL, (size_t)orig_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+  if ((uint64_t)dst > (uint64_t)(-4096)) {
+    return 0;
+  }
+
+  const uint8_t *body = src + header_size;
+  unsigned int dec_sz = aP_depack_safe(body, packed_size, dst, orig_size);
+  if (dec_sz == APLIB_ERROR || dec_sz != orig_size) {
+    (void)sys_munmap(dst, (size_t)orig_size);
+    return 0;
+  }
+
+  *out_buf = dst;
+  *out_len = (uint64_t)orig_size;
+  return 1;
+}
+
+// -----------------------------
 // tiny libc replacements
 // -----------------------------
 
@@ -620,6 +916,18 @@ __attribute__((section(".text._start"), noreturn)) void _start(void) {
   }
 
   const uint8_t *payload = (const uint8_t *)(&g_msda + 1);
+  uint64_t payload_len = g_msda.payload_len;
+  uint8_t *depacked = NULL;
+  uint64_t depacked_len = 0;
+
+  // If the payload starts with an AP32 safe header, depack it before mapping as an ELF.
+  if (is_ap32_safe(payload, payload_len)) {
+    if (!depack_ap32_safe(payload, payload_len, &depacked, &depacked_len)) {
+      sys_exit_group(123);
+    }
+    payload = depacked;
+    payload_len = depacked_len;
+  }
 
   // Sanity: payload must start with an ELF header.
   if (!is_compatible_elf(payload, 0)) {
@@ -629,8 +937,12 @@ __attribute__((section(".text._start"), noreturn)) void _start(void) {
   DBG("stage0: payload ok\n");
 
   struct mapped_elf exe = {0};
-  if (!map_elf(payload, g_msda.payload_len, &exe)) {
+  if (!map_elf(payload, payload_len, &exe)) {
     sys_exit_group(124);
+  }
+
+  if (depacked) {
+    (void)sys_munmap(depacked, (size_t)depacked_len);
   }
 
   DBG("stage0: exe mapped\n");

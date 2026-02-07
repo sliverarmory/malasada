@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"testing"
 )
 
@@ -158,8 +159,15 @@ func buildHelloSO(t *testing.T, arch Arch) []byte {
 		"CGO_ENABLED=1",
 		"GOOS="+goos,
 		"GOARCH="+goarch,
-		"CC=zig cc -target "+zigTarget,
 	)
+	// On linux, prefer native builds (no Zig dependency) for the current arch.
+	// For cross-arch builds, fall back to Zig if available; otherwise skip.
+	if !(runtime.GOOS == "linux" && runtime.GOARCH == goarch) {
+		if _, err := exec.LookPath("zig"); err != nil {
+			t.Skipf("zig not found (needed to cross-compile %s from %s/%s): %v", arch, runtime.GOOS, runtime.GOARCH, err)
+		}
+		cmd.Env = append(cmd.Env, "CC=zig cc -target "+zigTarget)
+	}
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	if err := cmd.Run(); err != nil {
