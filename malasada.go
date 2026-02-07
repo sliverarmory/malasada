@@ -45,16 +45,25 @@ var (
 	errBadELF = errors.New("bad ELF")
 )
 
+// DefaultCallExport is the default exported symbol name called by the generated
+// entry stub when the caller does not specify one.
+const DefaultCallExport = "StartW"
+
 // ConvertSharedObject reads a Linux ELF shared object from soPath, patches it to
 // call exportName as the process entrypoint, and wraps it with the stage0 loader
 // to produce an executable PIC .bin blob.
 func ConvertSharedObject(soPath string, exportName string) ([]byte, error) {
 	if exportName == "" {
-		return nil, fmt.Errorf("export name is required")
+		exportName = DefaultCallExport
 	}
 	so, err := os.ReadFile(soPath)
 	if err != nil {
 		return nil, err
+	}
+	// Common footgun: Go's buildmode=c-archive produces an ar archive (.a), which
+	// is sometimes misnamed as ".so". Provide a clear error early.
+	if bytes.HasPrefix(so, []byte("!<arch>\n")) {
+		return nil, fmt.Errorf("input %q is an ar archive (likely built with -buildmode=c-archive); malasada requires an ELF shared object (.so). Rebuild with: go build -buildmode=c-shared -o payload.so <pkg>", soPath)
 	}
 
 	arch, patchedSO, err := patchSOToCallExport(so, exportName)
@@ -146,9 +155,12 @@ const (
 
 	ptLoad    = 1
 	ptDynamic = 2
+	ptInterp  = 3
 	ptNote    = 4
+	ptPhdr    = 6
 
 	ptGnuEhFrame = 0x6474e550
+	ptGnuStack   = 0x6474e551
 )
 
 const (
@@ -160,6 +172,12 @@ const (
 const (
 	dtNull   = 0
 	dtFlags1 = 0x6ffffffb
+
+	dtInit          = 12
+	dtInitArray     = 25
+	dtInitArraySz   = 27
+	dtPreinitArray  = 32
+	dtPreinitArraySz = 33
 )
 
 const (
@@ -287,6 +305,20 @@ func writeELF64Phdr(b []byte, ph elf64Phdr) {
 	binary.LittleEndian.PutUint64(p[48:56], ph.align)
 }
 
+// swapELF64PhdrContents swaps the payload-relevant fields of a and b, but keeps
+// their fileOff values unchanged (fileOff represents the slot/location in the
+// program header table).
+func swapELF64PhdrContents(a, b *elf64Phdr) {
+	a.typ, b.typ = b.typ, a.typ
+	a.flags, b.flags = b.flags, a.flags
+	a.off, b.off = b.off, a.off
+	a.vaddr, b.vaddr = b.vaddr, a.vaddr
+	a.paddr, b.paddr = b.paddr, a.paddr
+	a.filesz, b.filesz = b.filesz, a.filesz
+	a.memsz, b.memsz = b.memsz, a.memsz
+	a.align, b.align = b.align, a.align
+}
+
 func alignUp(x, align uint64) uint64 {
 	if align == 0 {
 		return x
@@ -345,23 +377,76 @@ func patchSOToCallExport(so []byte, exportName string) (Arch, []byte, error) {
 	}
 
 	// Find a program header we can repurpose into a new executable PT_LOAD for the entry stub.
-	phIdx := -1
+	stubPhIdx := -1
 	for i := range phdrs {
 		if phdrs[i].typ == ptNote {
-			phIdx = i
+			stubPhIdx = i
 			break
 		}
 	}
-	if phIdx < 0 {
+	if stubPhIdx < 0 {
 		for i := range phdrs {
 			if phdrs[i].typ == ptGnuEhFrame {
-				phIdx = i
+				stubPhIdx = i
 				break
 			}
 		}
 	}
-	if phIdx < 0 {
+	if stubPhIdx < 0 {
 		return ArchUnknown, nil, fmt.Errorf("no suitable program header to repurpose (need PT_NOTE or PT_GNU_EH_FRAME)")
+	}
+
+	// Find a program header we can repurpose into PT_INTERP so glibc's dynamic
+	// loader treats the payload like a normal PIE executable.
+	interpPhIdx := -1
+	for i := range phdrs {
+		if i == stubPhIdx {
+			continue
+		}
+		if phdrs[i].typ == ptGnuStack {
+			interpPhIdx = i
+			break
+		}
+	}
+	if interpPhIdx < 0 {
+		for i := range phdrs {
+			if i == stubPhIdx {
+				continue
+			}
+			// Fall back to repurposing another low-value header if needed.
+			if phdrs[i].typ == ptNote || phdrs[i].typ == ptGnuEhFrame {
+				interpPhIdx = i
+				break
+			}
+		}
+	}
+	if interpPhIdx < 0 {
+		return ArchUnknown, nil, fmt.Errorf("no suitable program header to repurpose for PT_INTERP (need PT_GNU_STACK, PT_NOTE, or PT_GNU_EH_FRAME)")
+	}
+
+	// Ensure the payload has a PT_PHDR entry. Some glibc rtld code paths rely on
+	// this when computing the executable's load bias.
+	phdrIdx := -1
+	for i := range phdrs {
+		if phdrs[i].typ == ptPhdr {
+			phdrIdx = i
+			break
+		}
+	}
+	phdrPhIdx := -1
+	if phdrIdx < 0 {
+		for i := range phdrs {
+			if i == stubPhIdx || i == interpPhIdx {
+				continue
+			}
+			if phdrs[i].typ == ptGnuEhFrame {
+				phdrPhIdx = i
+				break
+			}
+		}
+		if phdrPhIdx < 0 {
+			return ArchUnknown, nil, fmt.Errorf("no suitable program header to repurpose for PT_PHDR (need PT_PHDR or PT_GNU_EH_FRAME)")
+		}
 	}
 
 	var maxVaddrEnd uint64
@@ -392,6 +477,11 @@ func patchSOToCallExport(so []byte, exportName string) (Arch, []byte, error) {
 	stubFileOff := alignUp(uint64(len(so)), maxAlign)
 	stubVaddr := alignUp(maxVaddrEnd, maxAlign)
 
+	initVaddrs, err := extractInitVaddrs(so, phdrs, *dynPh)
+	if err != nil {
+		return ArchUnknown, nil, err
+	}
+
 	// Append padding then the entry stub itself.
 	so2 := make([]byte, 0, int(stubFileOff)+1024)
 	so2 = append(so2, so...)
@@ -399,26 +489,81 @@ func patchSOToCallExport(so []byte, exportName string) (Arch, []byte, error) {
 		so2 = append(so2, bytes.Repeat([]byte{0}, pad)...)
 	}
 
-	stub, err := makeEntryStub(arch, stubVaddr, exportVaddr)
+	stub, err := makeEntryStub(arch, stubVaddr, exportVaddr, initVaddrs)
 	if err != nil {
 		return ArchUnknown, nil, err
 	}
 	so2 = append(so2, stub...)
 
+	// Add a PT_INTERP string (within the stub PT_LOAD) so glibc ld-linux treats
+	// the payload like a normal executable (needed for some rtld invariants).
+	interpPath := ""
+	switch arch {
+	case ArchLinuxAMD64:
+		interpPath = "/lib64/ld-linux-x86-64.so.2"
+	case ArchLinuxARM64:
+		interpPath = "/lib/ld-linux-aarch64.so.1"
+	default:
+		return ArchUnknown, nil, fmt.Errorf("unsupported arch %v", arch)
+	}
+	interpStr := append([]byte(interpPath), 0)
+	interpFileOff := uint64(len(so2))
+	interpVaddr := stubVaddr + uint64(len(stub))
+	so2 = append(so2, interpStr...)
+
 	// Convert the selected phdr into our stub PT_LOAD.
-	stubPh := phdrs[phIdx]
+	stubPh := phdrs[stubPhIdx]
 	stubPh.typ = ptLoad
 	stubPh.flags = pfR | pfX
 	stubPh.off = stubFileOff
 	stubPh.vaddr = stubVaddr
 	stubPh.paddr = stubVaddr
-	stubPh.filesz = uint64(len(stub))
-	stubPh.memsz = uint64(len(stub))
+	stubPh.filesz = uint64(len(stub) + len(interpStr))
+	stubPh.memsz = uint64(len(stub) + len(interpStr))
 	stubPh.align = maxAlign
+	phdrs[stubPhIdx] = stubPh
+
+	// Repurpose another phdr into PT_INTERP.
+	interpPh := phdrs[interpPhIdx]
+	interpPh.typ = ptInterp
+	interpPh.flags = pfR
+	interpPh.off = interpFileOff
+	interpPh.vaddr = interpVaddr
+	interpPh.paddr = interpVaddr
+	interpPh.filesz = uint64(len(interpStr))
+	interpPh.memsz = uint64(len(interpStr))
+	interpPh.align = 1
+	phdrs[interpPhIdx] = interpPh
+
+	// Add PT_PHDR if we had to repurpose one, and ensure it is the first phdr.
+	if phdrPhIdx >= 0 {
+		phdrPh := phdrs[phdrPhIdx]
+		phdrPh.typ = ptPhdr
+		phdrPh.flags = pfR
+		phdrPh.off = h.phoff
+		phdrPh.vaddr = h.phoff
+		phdrPh.paddr = h.phoff
+		phdrPh.filesz = uint64(h.phnum) * uint64(h.phentsize)
+		phdrPh.memsz = phdrPh.filesz
+		phdrPh.align = 8
+		phdrs[phdrPhIdx] = phdrPh
+		phdrIdx = phdrPhIdx
+	}
+	if phdrIdx >= 0 && phdrIdx != 0 {
+		// glibc's rtld startup code expects to discover the load bias from PT_PHDR
+		// before processing PT_DYNAMIC for the main program. Put PT_PHDR in slot 0
+		// to match normal PIE executables.
+		swapELF64PhdrContents(&phdrs[0], &phdrs[phdrIdx])
+		phdrIdx = 0
+	}
 
 	// Patch e_entry to point at the stub.
 	writeELF64Entry(so2, stubVaddr)
-	writeELF64Phdr(so2, stubPh)
+
+	// Write back all program headers (some are repurposed/reordered above).
+	for i := range phdrs {
+		writeELF64Phdr(so2, phdrs[i])
+	}
 
 	// Patch DT_FLAGS_1 |= DF_1_PIE if present.
 	if err := patchDTFlags1Pie(so2, *dynPh); err != nil {
@@ -455,18 +600,119 @@ func patchDTFlags1Pie(so []byte, dynPh elf64Phdr) error {
 	return nil
 }
 
-func makeEntryStub(arch Arch, stubVaddr uint64, exportVaddr uint64) ([]byte, error) {
+func vaddrToFileOff(phdrs []elf64Phdr, vaddr uint64, size uint64) (uint64, error) {
+	for i := range phdrs {
+		ph := phdrs[i]
+		if ph.typ != ptLoad {
+			continue
+		}
+		// For file-backed data (like init arrays), we need it to be within the
+		// segment's file image, not just its in-memory range.
+		if vaddr < ph.vaddr || vaddr+size > ph.vaddr+ph.filesz {
+			continue
+		}
+		off := ph.off + (vaddr - ph.vaddr)
+		return off, nil
+	}
+	return 0, fmt.Errorf("%w: vaddr 0x%x not in any PT_LOAD file range", errBadELF, vaddr)
+}
+
+func extractInitVaddrs(so []byte, phdrs []elf64Phdr, dynPh elf64Phdr) ([]uint64, error) {
+	// dynPh.off points to the dynamic entries in the file.
+	if dynPh.off+dynPh.filesz > uint64(len(so)) {
+		return nil, fmt.Errorf("%w: PT_DYNAMIC outside file", errBadELF)
+	}
+	dyn := so[dynPh.off : dynPh.off+dynPh.filesz]
+
+	var (
+		initVaddr          uint64
+		preinitArrayVaddr  uint64
+		preinitArraySz     uint64
+		initArrayVaddr     uint64
+		initArraySz        uint64
+	)
+
+	for off := 0; off+16 <= len(dyn); off += 16 {
+		tag := int64(binary.LittleEndian.Uint64(dyn[off : off+8]))
+		val := binary.LittleEndian.Uint64(dyn[off+8 : off+16])
+		if tag == dtNull {
+			break
+		}
+		switch uint64(tag) {
+		case dtInit:
+			initVaddr = val
+		case dtPreinitArray:
+			preinitArrayVaddr = val
+		case dtPreinitArraySz:
+			preinitArraySz = val
+		case dtInitArray:
+			initArrayVaddr = val
+		case dtInitArraySz:
+			initArraySz = val
+		}
+	}
+
+	readPtrArray := func(arrayVaddr, arraySz uint64) ([]uint64, error) {
+		if arrayVaddr == 0 || arraySz == 0 {
+			return nil, nil
+		}
+		if arraySz%8 != 0 {
+			return nil, fmt.Errorf("%w: init array size 0x%x not 8-byte aligned", errBadELF, arraySz)
+		}
+		fileOff, err := vaddrToFileOff(phdrs, arrayVaddr, arraySz)
+		if err != nil {
+			return nil, err
+		}
+		if fileOff+arraySz > uint64(len(so)) {
+			return nil, fmt.Errorf("%w: init array outside file", errBadELF)
+		}
+		b := so[fileOff : fileOff+arraySz]
+		out := make([]uint64, 0, arraySz/8)
+		for i := uint64(0); i < arraySz; i += 8 {
+			ptr := binary.LittleEndian.Uint64(b[i : i+8])
+			if ptr != 0 {
+				out = append(out, ptr)
+			}
+		}
+		return out, nil
+	}
+
+	var initCalls []uint64
+	// Match glibc's overall ordering:
+	// - DT_PREINIT_ARRAY (executables)
+	// - DT_INIT
+	// - DT_INIT_ARRAY
+	pre, err := readPtrArray(preinitArrayVaddr, preinitArraySz)
+	if err != nil {
+		return nil, err
+	}
+	initCalls = append(initCalls, pre...)
+
+	if initVaddr != 0 {
+		initCalls = append(initCalls, initVaddr)
+	}
+
+	initArr, err := readPtrArray(initArrayVaddr, initArraySz)
+	if err != nil {
+		return nil, err
+	}
+	initCalls = append(initCalls, initArr...)
+
+	return initCalls, nil
+}
+
+func makeEntryStub(arch Arch, stubVaddr uint64, exportVaddr uint64, initVaddrs []uint64) ([]byte, error) {
 	switch arch {
 	case ArchLinuxAMD64:
-		return makeStubAMD64(stubVaddr, exportVaddr)
+		return makeStubAMD64(stubVaddr, exportVaddr, initVaddrs)
 	case ArchLinuxARM64:
-		return makeStubARM64(stubVaddr, exportVaddr), nil
+		return makeStubARM64(stubVaddr, exportVaddr, initVaddrs), nil
 	default:
 		return nil, fmt.Errorf("unsupported arch %v", arch)
 	}
 }
 
-func makeStubAMD64(stubVaddr uint64, exportVaddr uint64) ([]byte, error) {
+func makeStubAMD64(stubVaddr uint64, exportVaddr uint64, initVaddrs []uint64) ([]byte, error) {
 	// call $+5 ; pop rbx ; sub rbx, imm32 ; mov rax, imm64 ; add rax, rbx ; call rax ; exit_group(0)
 	//
 	// rbx becomes the module base: module_base = (retaddr == stub+5) - (stub_vaddr+5)
@@ -475,20 +721,69 @@ func makeStubAMD64(stubVaddr uint64, exportVaddr uint64) ([]byte, error) {
 		return nil, fmt.Errorf("stub vaddr too large for amd64 stub encoding")
 	}
 	b := make([]byte, 0, 64)
+
+	// Base computation.
 	b = append(b,
 		0xE8, 0x00, 0x00, 0x00, 0x00, // call $+5
 		0x5B,                                     // pop rbx
 		0x48, 0x81, 0xEB, 0x00, 0x00, 0x00, 0x00, // sub rbx, imm32
+	)
+	binary.LittleEndian.PutUint32(b[9:13], uint32(stubVaddr+5))
+
+	// Preserve the entry stack pointer and compute (argc, argv, envp) once for
+	// constructor calls.
+	//
+	// r15 = entry_rsp
+	// r12 = argc
+	// r13 = argv
+	// r14 = envp
+	b = append(b,
+		0x49, 0x89, 0xE7, // mov r15, rsp
+		0x4D, 0x8B, 0x27, // mov r12, [r15]
+		0x4D, 0x8D, 0x6F, 0x08, // lea r13, [r15+8]
+		0x4C, 0x89, 0xE1, // mov rcx, r12
+		0x48, 0x83, 0xC1, 0x02, // add rcx, 2
+		0x48, 0xC1, 0xE1, 0x03, // shl rcx, 3
+		0x4D, 0x8D, 0x34, 0x0F, // lea r14, [r15+rcx]
+	)
+
+	// Call init functions (DT_PREINIT_ARRAY/DT_INIT/DT_INIT_ARRAY) so c-shared
+	// libraries (Go, etc.) can initialize before we call the exported symbol.
+	for _, vaddr := range initVaddrs {
+		if vaddr == 0 {
+			continue
+		}
+		// rdi = argc, rsi = argv, rdx = envp
+		start := len(b)
+		b = append(b,
+			0x4C, 0x89, 0xE7, // mov rdi, r12
+			0x4C, 0x89, 0xEE, // mov rsi, r13
+			0x4C, 0x89, 0xF2, // mov rdx, r14
+			0x48, 0xB8, // mov rax, imm64
+			0, 0, 0, 0, 0, 0, 0, 0,
+			0x48, 0x01, 0xD8, // add rax, rbx
+			0xFF, 0xD0, // call rax
+		)
+		binary.LittleEndian.PutUint64(b[start+11:start+19], vaddr)
+	}
+
+	// Call the requested export.
+	start := len(b)
+	b = append(b,
 		0x48, 0xB8, // mov rax, imm64
-		0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+		0, 0, 0, 0, 0, 0, 0, 0,
 		0x48, 0x01, 0xD8, // add rax, rbx
 		0xFF, 0xD0, // call rax
+	)
+	binary.LittleEndian.PutUint64(b[start+2:start+10], exportVaddr)
+
+	// exit_group(0)
+	b = append(b,
 		0xB8, 0xE7, 0x00, 0x00, 0x00, // mov eax, 231 (exit_group)
 		0x31, 0xFF, // xor edi, edi
 		0x0F, 0x05, // syscall
 	)
-	binary.LittleEndian.PutUint32(b[9:13], uint32(stubVaddr+5))
-	binary.LittleEndian.PutUint64(b[15:23], exportVaddr)
+
 	return b, nil
 }
 
@@ -504,9 +799,30 @@ func makeMovk64(rd uint32, imm16 uint16, shift uint32) uint32 {
 	return 0xf2800000 | (hw << 21) | (uint32(imm16) << 5) | (rd & 0x1f)
 }
 
-func makeStubARM64(stubVaddr uint64, exportVaddr uint64) []byte {
+func makeMovReg64(rd uint32, rm uint32) uint32 {
+	// ORR Xd, XZR, Xm (alias: MOV Xd, Xm)
+	return 0xaa0003e0 | ((rm & 0x1f) << 16) | (31 << 5) | (rd & 0x1f)
+}
+
+func makeAddImm64(rd uint32, rn uint32, imm12 uint16) uint32 {
+	// ADD Xd, Xn/SP, #imm12
+	return 0x91000000 | (uint32(imm12) << 10) | ((rn & 0x1f) << 5) | (rd & 0x1f)
+}
+
+func makeLdrImm64(rt uint32, rn uint32, immBytes uint32) uint32 {
+	// LDR Xt, [Xn/SP, #imm] (unsigned immediate, 64-bit); imm is scaled by 8.
+	imm12 := (immBytes / 8) & 0xfff
+	return 0xf9400000 | (imm12 << 10) | ((rn & 0x1f) << 5) | (rt & 0x1f)
+}
+
+func makeAddRegShift64(rd uint32, rn uint32, rm uint32, shift uint32) uint32 {
+	// ADD Xd, Xn, Xm, LSL #shift (shift: 0-63)
+	return 0x8b000000 | ((rm & 0x1f) << 16) | ((shift & 0x3f) << 10) | ((rn & 0x1f) << 5) | (rd & 0x1f)
+}
+
+func makeStubARM64(stubVaddr uint64, exportVaddr uint64, initVaddrs []uint64) []byte {
 	// See internal notes in stage0: x19 = stub_start; base = x19 - stub_vaddr.
-	// Then call (base + export_vaddr) and exit_group(0).
+	// Then call init functions (DT_INIT/DT_INIT_ARRAY) and the requested export.
 	const (
 		adrX19Dot      = 0x10000013
 		subX19X19X20   = 0xcb140273
@@ -517,6 +833,9 @@ func makeStubARM64(stubVaddr uint64, exportVaddr uint64) []byte {
 		rdX8           = 8
 		rdX19          = 19
 		rdX20          = 20
+		rdX21          = 21
+		rdX22          = 22
+		rdX23          = 23
 		_              = rdX19
 		_              = rdX20
 		exitGroupSysno = 94
@@ -534,15 +853,47 @@ func makeStubARM64(stubVaddr uint64, exportVaddr uint64) []byte {
 	)
 	words = append(words, subX19X19X20)
 
-	// x20 = export_vaddr
+	// Compute (argc, argv, envp) from the entry stack. This matches the kernel
+	// entry contract and avoids depending on register contents.
+	//
+	// x21 = argc
+	// x22 = argv (points to argv[0])
+	// x23 = envp
+	words = append(words,
+		makeLdrImm64(rdX21, 31, 0),       // ldr x21, [sp]
+		makeAddImm64(rdX22, 31, 8),       // add x22, sp, #8
+		makeAddRegShift64(rdX23, rdX22, rdX21, 3), // add x23, x22, x21, lsl #3
+		makeAddImm64(rdX23, rdX23, 8),    // add x23, x23, #8 (skip argv NULL)
+	)
+
+	// Call init functions (DT_PREINIT_ARRAY/DT_INIT/DT_INIT_ARRAY).
+	for _, vaddr := range initVaddrs {
+		if vaddr == 0 {
+			continue
+		}
+		// Restore init args for each call.
+		words = append(words,
+			makeMovReg64(rdX0, rdX21),
+			makeMovReg64(1, rdX22),
+			makeMovReg64(2, rdX23),
+		)
+		words = append(words,
+			makeMovz64(20, uint16(vaddr>>0), 0),
+			makeMovk64(20, uint16(vaddr>>16), 16),
+			makeMovk64(20, uint16(vaddr>>32), 32),
+			makeMovk64(20, uint16(vaddr>>48), 48),
+		)
+		words = append(words, addX16X19X20, blrX16)
+	}
+
+	// Call the requested export (no args).
 	words = append(words,
 		makeMovz64(20, uint16(exportVaddr>>0), 0),
 		makeMovk64(20, uint16(exportVaddr>>16), 16),
 		makeMovk64(20, uint16(exportVaddr>>32), 32),
 		makeMovk64(20, uint16(exportVaddr>>48), 48),
 	)
-	words = append(words, addX16X19X20)
-	words = append(words, blrX16)
+	words = append(words, addX16X19X20, blrX16)
 
 	// exit_group(0)
 	words = append(words,

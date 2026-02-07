@@ -16,15 +16,12 @@ func main() {
 	)
 
 	flag.StringVar(&outPath, "o", "", "Output .bin path (default: <input>.bin)")
-	flag.StringVar(&exportName, "call-export", "", "Exported function name to call after the .so is loaded")
+	flag.StringVar(&exportName, "call-export", malasada.DefaultCallExport, "Exported function name to call after the .so is loaded")
 	flag.Parse()
 
-	if exportName == "" {
-		fatalf("missing required flag: --call-export")
-	}
-
 	if flag.NArg() != 1 {
-		fatalf("usage: malasada [flags] <input.so>")
+		_, _ = fmt.Fprintf(os.Stderr, "usage: malasada [flags] <input.so>\n")
+		os.Exit(1)
 	}
 	soPath := flag.Arg(0)
 	if outPath == "" {
@@ -33,18 +30,19 @@ func main() {
 
 	bin, err := malasada.ConvertSharedObject(soPath, exportName)
 	if err != nil {
-		fatalf("%v", err)
+		_, _ = fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
 	}
 
-	if err := os.MkdirAll(filepath.Dir(outPath), 0o755); err != nil && filepath.Dir(outPath) != "." {
-		fatalf("mkdir: %v", err)
+	dir := filepath.Dir(outPath)
+	if dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "mkdir: %v\n", err)
+			os.Exit(1)
+		}
 	}
 	if err := os.WriteFile(outPath, bin, 0o755); err != nil {
-		fatalf("write %s: %v", outPath, err)
+		_, _ = fmt.Fprintf(os.Stderr, "write %s: %v\n", outPath, err)
+		os.Exit(1)
 	}
-}
-
-func fatalf(format string, args ...any) {
-	_, _ = fmt.Fprintf(os.Stderr, format+"\n", args...)
-	os.Exit(1)
 }

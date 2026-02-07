@@ -16,8 +16,10 @@ SECTIONS
     /* Everything else (helpers + embedded strings). */
     *(.text*)
 
+    /* Compiler-generated constants (jump tables, etc). */
+    *(.rodata*)
+
     /* Must be last. */
     *(.msda)
   }
 }
-

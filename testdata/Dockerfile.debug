@@ -1,0 +1,23 @@
+ARG GO_VERSION=1.25
+FROM golang:${GO_VERSION}-bookworm
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    gcc \
+    libc6-dev \
+    gdb \
+    strace \
+  && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /src
+COPY . .
+
+RUN go build -o /usr/local/bin/malasada ./cli
+
+RUN go build -buildmode=c-shared -o /tmp/hello.so ./testdata/hello
+RUN /usr/local/bin/malasada --call-export Hello -o /tmp/hello.bin /tmp/hello.so
+
+RUN gcc -O2 -o /tmp/runner ./testdata/runner/runner.c
+
+CMD ["bash"]
+

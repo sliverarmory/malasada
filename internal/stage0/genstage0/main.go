@@ -43,6 +43,8 @@ func main() {
 		fatalf("missing %s: %v", linkerLD, err)
 	}
 
+	stage0Debug := os.Getenv("MALASADA_STAGE0_DEBUG") != ""
+
 	tmpDir, err := os.MkdirTemp("", "malasada-generate-stage0-*")
 	if err != nil {
 		fatalf("mkdtemp: %v", err)
@@ -62,8 +64,24 @@ func main() {
 		elfOut := filepath.Join(tmpDir, "stage0-"+t.zigTarget+".elf")
 		binOut := filepath.Join(tmpDir, "stage0-"+t.zigTarget+".bin")
 
-		cmd := exec.Command(zig, "cc",
+		args := []string{
+			"cc",
 			"-target", t.zigTarget,
+		}
+		// Stage0 is executed as a raw .text blob (shellcode-like). It must be
+		// position-independent so symbol addressing works when the runner mmaps
+		// it at an arbitrary address.
+		//
+		// x86_64 needs explicit PIE flags to avoid absolute symbol immediates.
+		// aarch64 codegen is already PC-relative for our usage, and forcing PIE
+		// here can introduce relocations we do not apply to the raw blob.
+		if t.zigTarget == "x86_64-linux-gnu" {
+			args = append(args, "-fpie", "-pie")
+		}
+		if stage0Debug {
+			args = append(args, "-DMALASADA_STAGE0_DEBUG=1")
+		}
+		args = append(args,
 			"-ffreestanding", "-nostdlib",
 			"-fno-sanitize=all",
 			"-fno-stack-protector",
@@ -77,6 +95,7 @@ func main() {
 			"-o", elfOut,
 			stage0C,
 		)
+		cmd := exec.Command(zig, args...)
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		if err := cmd.Run(); err != nil {

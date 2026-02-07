@@ -141,6 +141,7 @@ static inline long sys_call1(long n, long a1) { return sys_call6(n, a1, 0, 0, 0,
 
 // syscall numbers (x86_64)
 #define __NR_read       0
+#define __NR_write      1
 #define __NR_close      3
 #define __NR_lseek      8
 #define __NR_mmap       9
@@ -164,6 +165,7 @@ static inline long sys_openat(int dirfd, const char *path, int flags, int mode) 
 }
 
 static inline long sys_read(int fd, void *buf, size_t len) { return sys_call3(__NR_read, fd, (long)buf, (long)len); }
+static inline long sys_write(int fd, const void *buf, size_t len) { return sys_call3(__NR_write, fd, (long)buf, (long)len); }
 static inline long sys_close(int fd) { return sys_call1(__NR_close, fd); }
 static inline long sys_lseek(int fd, long off, int whence) { return sys_call3(__NR_lseek, fd, off, whence); }
 
@@ -176,11 +178,12 @@ __attribute__((noreturn)) static inline void sys_exit_group(int code) {
 static inline void jump_with_stack(uint64_t dest, uint64_t *new_stack) {
   __asm__ volatile(
       "movq %[stack], %%rsp\n"
+      "movq %[stack], %%rdi\n"
       "xor %%rdx, %%rdx\n"
       "jmp *%[entry]\n"
       :
       : [stack] "r"(new_stack), [entry] "r"(dest)
-      : "rdx", "memory");
+      : "rdi", "rdx", "memory");
 }
 
 #elif defined(__aarch64__)
@@ -208,6 +211,7 @@ static inline long sys_call1(long n, long a1) { return sys_call6(n, a1, 0, 0, 0,
 
 // syscall numbers (aarch64)
 #define __NR_read       63
+#define __NR_write      64
 #define __NR_close      57
 #define __NR_lseek      62
 #define __NR_mmap       222
@@ -225,6 +229,7 @@ static inline long sys_openat(int dirfd, const char *path, int flags, int mode) 
   return sys_call4(__NR_openat, (long)dirfd, (long)path, flags, mode);
 }
 static inline long sys_read(int fd, void *buf, size_t len) { return sys_call3(__NR_read, fd, (long)buf, (long)len); }
+static inline long sys_write(int fd, const void *buf, size_t len) { return sys_call3(__NR_write, fd, (long)buf, (long)len); }
 static inline long sys_close(int fd) { return sys_call1(__NR_close, fd); }
 static inline long sys_lseek(int fd, long off, int whence) { return sys_call3(__NR_lseek, fd, off, whence); }
 
@@ -237,10 +242,11 @@ __attribute__((noreturn)) static inline void sys_exit_group(int code) {
 static inline void jump_with_stack(uint64_t dest, uint64_t *new_stack) {
   __asm__ volatile(
       "mov sp, %[stack]\n"
+      "mov x0, %[stack]\n"
       "br %[entry]\n"
       :
       : [stack] "r"(new_stack), [entry] "r"(dest)
-      : "memory");
+      : "x0", "memory");
 }
 
 static inline void clear_cache(void *start, void *end) {
@@ -249,6 +255,26 @@ static inline void clear_cache(void *start, void *end) {
 
 #else
 #error "Unsupported architecture (stage0 supports linux amd64 and arm64 only)"
+#endif
+
+// -----------------------------
+// Tiny debug print helper
+// -----------------------------
+
+#if defined(MALASADA_STAGE0_DEBUG)
+static inline size_t cstrlen(const char *s) {
+  size_t n = 0;
+  while (s[n]) n++;
+  return n;
+}
+
+static inline void dbg(const char *s) {
+  (void)sys_write(2, s, cstrlen(s));
+}
+
+#define DBG(msg) dbg(msg)
+#else
+#define DBG(msg) ((void)0)
 #endif
 
 // -----------------------------
@@ -336,8 +362,12 @@ static int is_compatible_elf(const uint8_t *data, uint16_t want_machine) {
 
 struct mapped_elf {
   uint8_t *base;
-  const Elf64_Ehdr *ehdr; // in mapped memory
-  uint64_t entry;
+  uint16_t machine;
+  uint16_t phentsize;
+  uint16_t phnum;
+  uint16_t _pad;
+  uint64_t phdr;  // runtime address of the program header table
+  uint64_t entry; // runtime entry address (base + e_entry)
 };
 
 static int map_elf(const uint8_t *data, uint64_t data_len, struct mapped_elf *out) {
@@ -404,7 +434,11 @@ static int map_elf(const uint8_t *data, uint64_t data_len, struct mapped_elf *ou
     if (ph[i].p_flags & PF_X) prot |= PROT_EXEC;
 
     uint64_t prot_addr = page_floor((uint64_t)dest);
-    uint64_t prot_len = page_ceil(ph[i].p_memsz);
+    // p_vaddr is not guaranteed to be page-aligned (only congruent with
+    // p_offset modulo the page size). mprotect needs a page-aligned address
+    // and a length that covers the entire segment range.
+    uint64_t prot_end = page_ceil((uint64_t)dest + ph[i].p_memsz);
+    uint64_t prot_len = prot_end - prot_addr;
     if (sys_mprotect((void *)prot_addr, (size_t)prot_len, prot) != 0) {
       return 0;
     }
@@ -415,11 +449,18 @@ static int map_elf(const uint8_t *data, uint64_t data_len, struct mapped_elf *ou
   clear_cache(mapping, mapping + map_sz);
 #endif
 
-  // Assume the ELF header is within the PT_LOAD that begins at file offset 0.
-  const Elf64_Ehdr *mapped_eh = (const Elf64_Ehdr *)(base + (ph_off0 ? ph_off0->p_vaddr : 0));
+  // We need to populate auxv with AT_PHDR/AT_PHENT/AT_PHNUM/AT_ENTRY. Those
+  // values should describe the *mapped* image. The program headers live within
+  // the PT_LOAD that maps file offset 0 (typically the first segment).
+  if (!ph_off0) {
+    return 0;
+  }
 
   out->base = base;
-  out->ehdr = mapped_eh;
+  out->machine = eh->e_machine;
+  out->phentsize = eh->e_phentsize;
+  out->phnum = eh->e_phnum;
+  out->phdr = (uint64_t)(uintptr_t)(base + ph_off0->p_vaddr + eh->e_phoff);
   out->entry = (uint64_t)(uintptr_t)(base + eh->e_entry);
   return 1;
 }
@@ -503,19 +544,19 @@ static uint64_t *build_stack(uint64_t stack_top, const struct mapped_elf *exe, c
         break;
       case AT_PHDR:
         have_phdr = 1;
-        val = (uint64_t)(uintptr_t)(exe->base + exe->ehdr->e_phoff);
+        val = exe->phdr;
         break;
       case AT_PHENT:
         have_phent = 1;
-        val = (uint64_t)exe->ehdr->e_phentsize;
+        val = (uint64_t)exe->phentsize;
         break;
       case AT_PHNUM:
         have_phnum = 1;
-        val = (uint64_t)exe->ehdr->e_phnum;
+        val = (uint64_t)exe->phnum;
         break;
       case AT_ENTRY:
         have_entry = 1;
-        val = (uint64_t)(uintptr_t)(exe->base + exe->ehdr->e_entry);
+        val = exe->entry;
         break;
       case AT_PAGESZ:
         have_pagesz = 1;
@@ -528,6 +569,7 @@ static uint64_t *build_stack(uint64_t stack_top, const struct mapped_elf *exe, c
     auxv_out[out_i++] = tag;
     auxv_out[out_i++] = val;
   }
+
   // Ensure required entries exist even if the process auxv didn't have them.
   // Keep this small; the dynamic loader needs these at minimum.
   if (!have_base) {
@@ -536,19 +578,19 @@ static uint64_t *build_stack(uint64_t stack_top, const struct mapped_elf *exe, c
   }
   if (!have_phdr) {
     auxv_out[out_i++] = AT_PHDR;
-    auxv_out[out_i++] = (uint64_t)(uintptr_t)(exe->base + exe->ehdr->e_phoff);
+    auxv_out[out_i++] = exe->phdr;
   }
   if (!have_phent) {
     auxv_out[out_i++] = AT_PHENT;
-    auxv_out[out_i++] = (uint64_t)exe->ehdr->e_phentsize;
+    auxv_out[out_i++] = (uint64_t)exe->phentsize;
   }
   if (!have_phnum) {
     auxv_out[out_i++] = AT_PHNUM;
-    auxv_out[out_i++] = (uint64_t)exe->ehdr->e_phnum;
+    auxv_out[out_i++] = (uint64_t)exe->phnum;
   }
   if (!have_entry) {
     auxv_out[out_i++] = AT_ENTRY;
-    auxv_out[out_i++] = (uint64_t)(uintptr_t)(exe->base + exe->ehdr->e_entry);
+    auxv_out[out_i++] = exe->entry;
   }
   if (!have_pagesz) {
     auxv_out[out_i++] = AT_PAGESZ;
@@ -568,6 +610,8 @@ __attribute__((section(".text._start"), noreturn)) void _start(void) {
   keep_ptr(path_ld_linux);
   keep_ptr(path_ld_linux_alt);
 
+  DBG("stage0: enter\n");
+
   if (g_msda.arch != MSDA_ARCH_ID || g_msda.version != 1) {
     sys_exit_group(121);
   }
@@ -582,10 +626,14 @@ __attribute__((section(".text._start"), noreturn)) void _start(void) {
     sys_exit_group(123);
   }
 
+  DBG("stage0: payload ok\n");
+
   struct mapped_elf exe = {0};
   if (!map_elf(payload, g_msda.payload_len, &exe)) {
     sys_exit_group(124);
   }
+
+  DBG("stage0: exe mapped\n");
 
   // Map the system dynamic loader into memory.
   uint8_t *ld_file = NULL;
@@ -596,7 +644,7 @@ __attribute__((section(".text._start"), noreturn)) void _start(void) {
     }
   }
 
-  if (!is_compatible_elf(ld_file, exe.ehdr->e_machine)) {
+  if (!is_compatible_elf(ld_file, exe.machine)) {
     sys_exit_group(126);
   }
 
@@ -606,12 +654,16 @@ __attribute__((section(".text._start"), noreturn)) void _start(void) {
   }
   (void)sys_munmap(ld_file, (size_t)ld_file_len);
 
+  DBG("stage0: ld mapped\n");
+
   // Read auxv from /proc/self/auxv.
   uint8_t auxv_buf[4096];
   size_t auxv_len = 0;
   if (!read_auxv(auxv_buf, sizeof(auxv_buf), &auxv_len)) {
     sys_exit_group(128);
   }
+
+  DBG("stage0: auxv ok\n");
 
   // Allocate a fresh stack with plenty of room to grow.
   size_t stack_sz = 2048u * PAGE_SIZE;
@@ -623,14 +675,16 @@ __attribute__((section(".text._start"), noreturn)) void _start(void) {
   uint64_t stack_top = (uint64_t)(uintptr_t)stack_mapping + (uint64_t)stack_sz - PAGE_SIZE;
   // ABI alignment at program entry differs by arch.
 #if defined(__x86_64__)
-  stack_top &= ~0xfull;
-  stack_top -= 8; // rsp % 16 == 8 at entry
+  // The kernel enters the program/loader with a 16-byte aligned stack. Keep
+  // that invariant so ld-linux and later calls see ABI-correct alignment.
+  stack_top &= ~0xfull; // rsp % 16 == 0
 #else
   stack_top &= ~0xfull; // sp % 16 == 0
 #endif
 
   uint64_t *new_sp = build_stack(stack_top, &exe, &interp, auxv_buf, auxv_len);
 
+  DBG("stage0: jumping to ld\n");
   jump_with_stack(interp.entry, new_sp);
   sys_exit_group(130);
 }

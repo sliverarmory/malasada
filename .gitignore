@@ -5,6 +5,7 @@
 *~
 .idea/
 .vscode/
+.cache/
 
 # Go
 *.exe
@@ -29,4 +30,3 @@ testdata/**/*.so
 testdata/**/*.bin
 testdata/runner/runner
 testdata/runner/runner.exe
-
