@@ -108,11 +108,61 @@ func TestPatchSOToCallExport_LinuxARM64(t *testing.T) {
 	}
 }
 
+func TestPatchSOToCallExport_Linux386(t *testing.T) {
+	so := buildHelloSO(t, ArchLinux386)
+	arch, patched, err := patchSOToCallExport(so, "Hello")
+	if err != nil {
+		t.Fatalf("patch: %v", err)
+	}
+	if arch != ArchLinux386 {
+		t.Fatalf("arch mismatch: %v", arch)
+	}
+
+	h, err := parseELF32Header(patched)
+	if err != nil {
+		t.Fatalf("parse patched header: %v", err)
+	}
+	if h.entry == 0 {
+		t.Fatalf("expected non-zero e_entry")
+	}
+
+	phdrs, err := parseELF32Phdrs(patched, h)
+	if err != nil {
+		t.Fatalf("parse phdrs: %v", err)
+	}
+	var found bool
+	for _, ph := range phdrs {
+		if ph.typ != ptLoad {
+			continue
+		}
+		if ph.vaddr != h.entry {
+			continue
+		}
+		if ph.flags&(pfR|pfX) != (pfR | pfX) {
+			t.Fatalf("stub segment missing R|X flags: 0x%x", ph.flags)
+		}
+		if uint64(ph.off)+uint64(ph.filesz) > uint64(len(patched)) {
+			t.Fatalf("stub segment outside file")
+		}
+		start := int(ph.off)
+		end := start + int(ph.filesz)
+		stub := patched[start:end]
+		if !bytes.HasPrefix(stub, []byte{0xE8, 0x00, 0x00, 0x00, 0x00, 0x5B}) { // call; pop ebx
+			t.Fatalf("i386 stub prefix mismatch: %x", stub[:8])
+		}
+		found = true
+		break
+	}
+	if !found {
+		t.Fatalf("did not find stub PT_LOAD segment at entry")
+	}
+}
+
 func TestStage0HeaderAtEnd(t *testing.T) {
 	t.Setenv("ZIG_GLOBAL_CACHE_DIR", filepath.Join(t.TempDir(), "zig-cache"))
 	t.Setenv("ZIG_LOCAL_CACHE_DIR", filepath.Join(t.TempDir(), "zig-cache-local"))
 
-	for _, arch := range []Arch{ArchLinuxAMD64, ArchLinuxARM64} {
+	for _, arch := range []Arch{ArchLinuxAMD64, ArchLinuxARM64, ArchLinux386} {
 		stage0, err := buildStage0(arch)
 		if err != nil {
 			t.Fatalf("buildStage0(%v): %v", arch, err)
@@ -132,6 +182,8 @@ func TestStage0HeaderAtEnd(t *testing.T) {
 			wantArchID = 1
 		case ArchLinuxARM64:
 			wantArchID = 2
+		case ArchLinux386:
+			wantArchID = 3
 		default:
 			t.Fatalf("unsupported arch %v", arch)
 		}
@@ -176,6 +228,10 @@ func buildHelloSO(t *testing.T, arch Arch) []byte {
 		goarch = "arm64"
 		zigTarget = "aarch64-linux-gnu"
 		machineWant = elf.EM_AARCH64
+	case ArchLinux386:
+		goarch = "386"
+		zigTarget = "x86-linux-gnu"
+		machineWant = elf.EM_386
 	default:
 		t.Fatalf("unsupported arch %v", arch)
 	}

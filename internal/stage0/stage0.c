@@ -27,6 +27,7 @@
 #define ELFMAG2 'L'
 #define ELFMAG3 'F'
 
+#define ELFCLASS32 1
 #define ELFCLASS64 2
 #define ELFDATA2LSB 1
 
@@ -72,41 +73,83 @@
 // Hardcode the page size to keep stage0 small.
 #define PAGE_SIZE 0x1000u
 
-typedef uint64_t Elf64_Addr;
-typedef uint64_t Elf64_Off;
-typedef uint16_t Elf64_Half;
-typedef uint32_t Elf64_Word;
-typedef int32_t  Elf64_Sword;
-typedef uint64_t Elf64_Xword;
-typedef int64_t  Elf64_Sxword;
+static inline int is_syscall_err_ptr(const void *p);
+
+#if defined(__i386__)
+typedef uint32_t Elf_Addr;
+typedef uint32_t Elf_Off;
+typedef uint16_t Elf_Half;
+typedef uint32_t Elf_Word;
 
 typedef struct {
   unsigned char e_ident[EI_NIDENT];
-  Elf64_Half e_type;
-  Elf64_Half e_machine;
-  Elf64_Word e_version;
-  Elf64_Addr e_entry;
-  Elf64_Off e_phoff;
-  Elf64_Off e_shoff;
-  Elf64_Word e_flags;
-  Elf64_Half e_ehsize;
-  Elf64_Half e_phentsize;
-  Elf64_Half e_phnum;
-  Elf64_Half e_shentsize;
-  Elf64_Half e_shnum;
-  Elf64_Half e_shstrndx;
-} Elf64_Ehdr;
+  Elf_Half e_type;
+  Elf_Half e_machine;
+  Elf_Word e_version;
+  Elf_Addr e_entry;
+  Elf_Off e_phoff;
+  Elf_Off e_shoff;
+  Elf_Word e_flags;
+  Elf_Half e_ehsize;
+  Elf_Half e_phentsize;
+  Elf_Half e_phnum;
+  Elf_Half e_shentsize;
+  Elf_Half e_shnum;
+  Elf_Half e_shstrndx;
+} Elf_Ehdr;
 
 typedef struct {
-  Elf64_Word p_type;
-  Elf64_Word p_flags;
-  Elf64_Off p_offset;
-  Elf64_Addr p_vaddr;
-  Elf64_Addr p_paddr;
-  Elf64_Xword p_filesz;
-  Elf64_Xword p_memsz;
-  Elf64_Xword p_align;
-} Elf64_Phdr;
+  Elf_Word p_type;
+  Elf_Off p_offset;
+  Elf_Addr p_vaddr;
+  Elf_Addr p_paddr;
+  Elf_Word p_filesz;
+  Elf_Word p_memsz;
+  Elf_Word p_flags;
+  Elf_Word p_align;
+} Elf_Phdr;
+
+#define ELFCLASS_NATIVE ELFCLASS32
+
+#else
+
+typedef uint64_t Elf_Addr;
+typedef uint64_t Elf_Off;
+typedef uint16_t Elf_Half;
+typedef uint32_t Elf_Word;
+typedef uint64_t Elf_Xword;
+
+typedef struct {
+  unsigned char e_ident[EI_NIDENT];
+  Elf_Half e_type;
+  Elf_Half e_machine;
+  Elf_Word e_version;
+  Elf_Addr e_entry;
+  Elf_Off e_phoff;
+  Elf_Off e_shoff;
+  Elf_Word e_flags;
+  Elf_Half e_ehsize;
+  Elf_Half e_phentsize;
+  Elf_Half e_phnum;
+  Elf_Half e_shentsize;
+  Elf_Half e_shnum;
+  Elf_Half e_shstrndx;
+} Elf_Ehdr;
+
+typedef struct {
+  Elf_Word p_type;
+  Elf_Word p_flags;
+  Elf_Off p_offset;
+  Elf_Addr p_vaddr;
+  Elf_Addr p_paddr;
+  Elf_Xword p_filesz;
+  Elf_Xword p_memsz;
+  Elf_Xword p_align;
+} Elf_Phdr;
+
+#define ELFCLASS_NATIVE ELFCLASS64
+
+#endif
 
 // -----------------------------
 // arch-specific syscall glue
@@ -175,7 +218,7 @@ __attribute__((noreturn)) static inline void sys_exit_group(int code) {
   }
 }
 
-static inline void jump_with_stack(uint64_t dest, uint64_t *new_stack) {
+static inline void jump_with_stack(uintptr_t dest, uintptr_t *new_stack) {
   __asm__ volatile(
       "movq %[stack], %%rsp\n"
       "movq %[stack], %%rdi\n"
@@ -184,6 +227,95 @@ static inline void jump_with_stack(uint64_t dest, uint64_t *new_stack) {
       :
       : [stack] "r"(new_stack), [entry] "r"(dest)
       : "rdi", "rdx", "memory");
+}
+
+#elif defined(__i386__)
+#define MSDA_ARCH_ID 3u
+
+static inline long sys_call1(long n, long a1) {
+  long ret;
+  __asm__ volatile("int $0x80" : "=a"(ret) : "a"(n), "b"(a1) : "cc", "memory");
+  return ret;
+}
+
+static inline long sys_call2(long n, long a1, long a2) {
+  long ret;
+  __asm__ volatile("int $0x80" : "=a"(ret) : "a"(n), "b"(a1), "c"(a2) : "cc", "memory");
+  return ret;
+}
+
+static inline long sys_call3(long n, long a1, long a2, long a3) {
+  long ret;
+  __asm__ volatile("int $0x80" : "=a"(ret) : "a"(n), "b"(a1), "c"(a2), "d"(a3) : "cc", "memory");
+  return ret;
+}
+
+static inline long sys_call4(long n, long a1, long a2, long a3, long a4) {
+  long ret;
+  __asm__ volatile("int $0x80" : "=a"(ret) : "a"(n), "b"(a1), "c"(a2), "d"(a3), "S"(a4) : "cc", "memory");
+  return ret;
+}
+
+// syscall numbers (i386)
+#define __NR_read       3
+#define __NR_write      4
+#define __NR_close      6
+#define __NR_lseek      19
+#define __NR_mmap       90
+#define __NR_mprotect   125
+#define __NR_munmap     91
+#define __NR_openat     295
+#define __NR_exit_group 252
+
+struct mmap_arg_struct {
+  unsigned long addr;
+  unsigned long len;
+  unsigned long prot;
+  unsigned long flags;
+  unsigned long fd;
+  unsigned long offset;
+};
+
+static inline void *sys_mmap(void *addr, size_t len, int prot, int flags, int fd, uint64_t off) {
+  // i386 __NR_mmap takes a pointer to mmap_arg_struct.
+  if (off > 0xffffffffull) {
+    return (void *)(long)-22; // -EINVAL
+  }
+  struct mmap_arg_struct args = {
+      .addr = (unsigned long)addr,
+      .len = (unsigned long)len,
+      .prot = (unsigned long)prot,
+      .flags = (unsigned long)flags,
+      .fd = (unsigned long)fd,
+      .offset = (unsigned long)off,
+  };
+  return (void *)sys_call1(__NR_mmap, (long)&args);
+}
+
+static inline long sys_mprotect(void *addr, size_t len, int prot) { return sys_call3(__NR_mprotect, (long)addr, (long)len, prot); }
+static inline long sys_munmap(void *addr, size_t len) { return sys_call2(__NR_munmap, (long)addr, (long)len); }
+static inline long sys_openat(int dirfd, const char *path, int flags, int mode) {
+  return sys_call4(__NR_openat, (long)dirfd, (long)path, flags, mode);
+}
+static inline long sys_read(int fd, void *buf, size_t len) { return sys_call3(__NR_read, fd, (long)buf, (long)len); }
+static inline long sys_write(int fd, const void *buf, size_t len) { return sys_call3(__NR_write, fd, (long)buf, (long)len); }
+static inline long sys_close(int fd) { return sys_call1(__NR_close, fd); }
+static inline long sys_lseek(int fd, long off, int whence) { return sys_call3(__NR_lseek, fd, off, whence); }
+
+__attribute__((noreturn)) static inline void sys_exit_group(int code) {
+  (void)sys_call1(__NR_exit_group, code);
+  for (;;) {
+  }
+}
+
+static inline void jump_with_stack(uintptr_t dest, uintptr_t *new_stack) {
+  __asm__ volatile(
+      "movl %[stack], %%esp\n"
+      "xorl %%edx, %%edx\n"
+      "jmp *%[entry]\n"
+      :
+      : [stack] "r"(new_stack), [entry] "r"(dest)
+      : "edx", "memory");
 }
 
 #elif defined(__aarch64__)
@@ -239,7 +371,7 @@ __attribute__((noreturn)) static inline void sys_exit_group(int code) {
   }
 }
 
-static inline void jump_with_stack(uint64_t dest, uint64_t *new_stack) {
+static inline void jump_with_stack(uintptr_t dest, uintptr_t *new_stack) {
   __asm__ volatile(
       "mov sp, %[stack]\n"
       "mov x0, %[stack]\n"
@@ -254,7 +386,7 @@ static inline void clear_cache(void *start, void *end) {
 }
 
 #else
-#error "Unsupported architecture (stage0 supports linux amd64 and arm64 only)"
+#error "Unsupported architecture (stage0 supports linux amd64, arm64, and 386 only)"
 #endif
 
 // -----------------------------
@@ -291,6 +423,9 @@ __attribute__((section(".text"), aligned(1))) static const char path_ld_linux_al
 #elif defined(__aarch64__)
 __attribute__((section(".text"), aligned(1))) static const char path_ld_linux[] = "/lib/ld-linux-aarch64.so.1";
 __attribute__((section(".text"), aligned(1))) static const char path_ld_linux_alt[] = "/lib/aarch64-linux-gnu/ld-linux-aarch64.so.1";
+#elif defined(__i386__)
+__attribute__((section(".text"), aligned(1))) static const char path_ld_linux[] = "/lib/ld-linux.so.2";
+__attribute__((section(".text"), aligned(1))) static const char path_ld_linux_alt[] = "/lib/i386-linux-gnu/ld-linux.so.2";
 #endif
 
 // -----------------------------
@@ -597,7 +732,7 @@ static int depack_ap32_safe(const uint8_t *src, uint64_t src_len, uint8_t **out_
   }
 
   uint8_t *dst = (uint8_t *)sys_mmap(NULL, (size_t)orig_size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  if ((uint64_t)dst > (uint64_t)(-4096)) {
+  if (is_syscall_err_ptr(dst)) {
     return 0;
   }
 
@@ -637,13 +772,14 @@ static void *memset8(void *dst, int c, size_t n) {
 
 static inline uint64_t page_floor(uint64_t x) { return x & ~(uint64_t)(PAGE_SIZE - 1); }
 static inline uint64_t page_ceil(uint64_t x) { return (x + (PAGE_SIZE - 1)) & ~(uint64_t)(PAGE_SIZE - 1); }
+static inline int is_syscall_err_ptr(const void *p) { return (uintptr_t)p >= (uintptr_t)-4095; }
 
 static int is_compatible_elf(const uint8_t *data, uint16_t want_machine) {
-  const Elf64_Ehdr *eh = (const Elf64_Ehdr *)data;
+  const Elf_Ehdr *eh = (const Elf_Ehdr *)data;
   if (eh->e_ident[0] != ELFMAG0 || eh->e_ident[1] != ELFMAG1 || eh->e_ident[2] != ELFMAG2 || eh->e_ident[3] != ELFMAG3) {
     return 0;
   }
-  if (eh->e_ident[4] != ELFCLASS64 || eh->e_ident[5] != ELFDATA2LSB) {
+  if (eh->e_ident[4] != ELFCLASS_NATIVE || eh->e_ident[5] != ELFDATA2LSB) {
     return 0;
   }
   // Only ET_DYN payloads are supported here.
@@ -661,24 +797,23 @@ struct mapped_elf {
   uint16_t machine;
   uint16_t phentsize;
   uint16_t phnum;
-  uint16_t _pad;
-  uint64_t phdr;  // runtime address of the program header table
-  uint64_t entry; // runtime entry address (base + e_entry)
+  uintptr_t phdr;  // runtime address of the program header table
+  uintptr_t entry; // runtime entry address (base + e_entry)
 };
 
 static int map_elf(const uint8_t *data, uint64_t data_len, struct mapped_elf *out) {
-  const Elf64_Ehdr *eh = (const Elf64_Ehdr *)data;
-  if (eh->e_phoff == 0 || eh->e_phentsize != sizeof(Elf64_Phdr) || eh->e_phnum == 0) {
+  const Elf_Ehdr *eh = (const Elf_Ehdr *)data;
+  if (eh->e_phoff == 0 || eh->e_phentsize != sizeof(Elf_Phdr) || eh->e_phnum == 0) {
     return 0;
   }
-  if (eh->e_phoff + (uint64_t)eh->e_phnum * sizeof(Elf64_Phdr) > data_len) {
+  if ((uint64_t)eh->e_phoff + (uint64_t)eh->e_phnum * sizeof(Elf_Phdr) > data_len) {
     return 0;
   }
 
-  const Elf64_Phdr *ph = (const Elf64_Phdr *)(data + eh->e_phoff);
+  const Elf_Phdr *ph = (const Elf_Phdr *)(data + (size_t)eh->e_phoff);
   uint64_t min_vaddr = UINT64_MAX;
   uint64_t max_vaddr_end = 0;
-  const Elf64_Phdr *ph_off0 = NULL;
+  const Elf_Phdr *ph_off0 = NULL;
 
   for (uint16_t i = 0; i < eh->e_phnum; i++) {
     if (ph[i].p_type != PT_LOAD) {
@@ -690,7 +825,7 @@ static int map_elf(const uint8_t *data, uint64_t data_len, struct mapped_elf *ou
     if (ph[i].p_vaddr < min_vaddr) {
       min_vaddr = ph[i].p_vaddr;
     }
-    uint64_t end = ph[i].p_vaddr + ph[i].p_memsz;
+    uint64_t end = (uint64_t)ph[i].p_vaddr + (uint64_t)ph[i].p_memsz;
     if (end > max_vaddr_end) {
       max_vaddr_end = end;
     }
@@ -702,24 +837,27 @@ static int map_elf(const uint8_t *data, uint64_t data_len, struct mapped_elf *ou
   uint64_t map_lo = page_floor(min_vaddr);
   uint64_t map_hi = page_ceil(max_vaddr_end);
   uint64_t map_sz = map_hi - map_lo;
+  if (map_hi > (uint64_t)UINTPTR_MAX || map_sz > (uint64_t)SIZE_MAX) {
+    return 0;
+  }
 
   uint8_t *mapping = (uint8_t *)sys_mmap(NULL, (size_t)map_sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-  if ((uint64_t)mapping > (uint64_t)(-4096)) {
+  if (is_syscall_err_ptr(mapping)) {
     return 0;
   }
   memset8(mapping, 0, (size_t)map_sz);
 
-  uint8_t *base = mapping - map_lo;
+  uint8_t *base = mapping - (uintptr_t)map_lo;
 
   for (uint16_t i = 0; i < eh->e_phnum; i++) {
     if (ph[i].p_type != PT_LOAD) {
       continue;
     }
-    if (ph[i].p_offset + ph[i].p_filesz > data_len) {
+    if ((uint64_t)ph[i].p_offset + (uint64_t)ph[i].p_filesz > data_len) {
       return 0;
     }
-    uint8_t *dest = base + ph[i].p_vaddr;
-    const uint8_t *src = data + ph[i].p_offset;
+    uint8_t *dest = base + (uintptr_t)ph[i].p_vaddr;
+    const uint8_t *src = data + (size_t)ph[i].p_offset;
     if (ph[i].p_filesz) {
       memcpy8(dest, src, (size_t)ph[i].p_filesz);
     }
@@ -729,11 +867,11 @@ static int map_elf(const uint8_t *data, uint64_t data_len, struct mapped_elf *ou
     if (ph[i].p_flags & PF_W) prot |= PROT_WRITE;
     if (ph[i].p_flags & PF_X) prot |= PROT_EXEC;
 
-    uint64_t prot_addr = page_floor((uint64_t)dest);
+    uint64_t prot_addr = page_floor((uint64_t)(uintptr_t)dest);
     // p_vaddr is not guaranteed to be page-aligned (only congruent with
     // p_offset modulo the page size). mprotect needs a page-aligned address
     // and a length that covers the entire segment range.
-    uint64_t prot_end = page_ceil((uint64_t)dest + ph[i].p_memsz);
+    uint64_t prot_end = page_ceil((uint64_t)(uintptr_t)dest + (uint64_t)ph[i].p_memsz);
     uint64_t prot_len = prot_end - prot_addr;
     if (sys_mprotect((void *)prot_addr, (size_t)prot_len, prot) != 0) {
       return 0;
@@ -756,8 +894,8 @@ static int map_elf(const uint8_t *data, uint64_t data_len, struct mapped_elf *ou
   out->machine = eh->e_machine;
   out->phentsize = eh->e_phentsize;
   out->phnum = eh->e_phnum;
-  out->phdr = (uint64_t)(uintptr_t)(base + ph_off0->p_vaddr + eh->e_phoff);
-  out->entry = (uint64_t)(uintptr_t)(base + eh->e_entry);
+  out->phdr = (uintptr_t)(base + (uintptr_t)ph_off0->p_vaddr + (uintptr_t)eh->e_phoff);
+  out->entry = (uintptr_t)(base + (uintptr_t)eh->e_entry);
   return 1;
 }
 
@@ -777,7 +915,7 @@ static int mmap_file_ro(const char *path, uint8_t **data, uint64_t *data_len) {
   uint8_t *mapping = (uint8_t *)sys_mmap(NULL, (size_t)sz, PROT_READ, MAP_PRIVATE, (int)fd, 0);
   (void)sys_close((int)fd);
 
-  if ((uint64_t)mapping > (uint64_t)(-4096)) {
+  if (is_syscall_err_ptr(mapping)) {
     return 0;
   }
 
@@ -800,11 +938,11 @@ static int read_auxv(uint8_t *buf, size_t buf_len, size_t *out_len) {
   return 1;
 }
 
-static uint64_t *build_stack(uint64_t stack_top, const struct mapped_elf *exe, const struct mapped_elf *interp, const uint8_t *auxv_buf,
-                            size_t auxv_len) {
+static uintptr_t *build_stack(uintptr_t stack_top, const struct mapped_elf *exe, const struct mapped_elf *interp, const uint8_t *auxv_buf,
+                              size_t auxv_len) {
   // Place the initial stack words at stack_top. The stack grows down; we only
   // need a single page above the pivot for argv/env/auxv.
-  uint64_t *sp = (uint64_t *)(uintptr_t)stack_top;
+  uintptr_t *sp = (uintptr_t *)stack_top;
 
   // argv[0] can be any readable string. Use a pointer into stage0's .text.
   __attribute__((section(".text"), aligned(1))) static const char argv0[] = "payload";
@@ -813,30 +951,30 @@ static uint64_t *build_stack(uint64_t stack_top, const struct mapped_elf *exe, c
   // argc
   sp[0] = 1;
   // argv
-  sp[1] = (uint64_t)(uintptr_t)argv0;
+  sp[1] = (uintptr_t)argv0;
   sp[2] = 0;
   // envp (empty)
   sp[3] = 0;
 
   // auxv starts after: argc + argv pointers + NULL + envp NULL
-  uint64_t *auxv_out = &sp[4];
+  uintptr_t *auxv_out = &sp[4];
 
   // Copy auxv from /proc/self/auxv but override the program-info entries.
   // Format is pairs of (tag, val) terminated by AT_NULL.
-  const uint64_t *auxv_in = (const uint64_t *)(const void *)auxv_buf;
-  size_t pairs = auxv_len / (sizeof(uint64_t) * 2);
+  const uintptr_t *auxv_in = (const uintptr_t *)(const void *)auxv_buf;
+  size_t pairs = auxv_len / (sizeof(uintptr_t) * 2);
   size_t out_i = 0;
   int have_base = 0, have_phdr = 0, have_phent = 0, have_phnum = 0, have_entry = 0, have_pagesz = 0;
   for (size_t i = 0; i < pairs; i++) {
-    uint64_t tag = auxv_in[i * 2 + 0];
-    uint64_t val = auxv_in[i * 2 + 1];
+    uintptr_t tag = auxv_in[i * 2 + 0];
+    uintptr_t val = auxv_in[i * 2 + 1];
     if (tag == AT_NULL) {
       break;
     }
     switch (tag) {
       case AT_BASE:
         have_base = 1;
-        val = (uint64_t)(uintptr_t)interp->base;
+        val = (uintptr_t)interp->base;
         break;
       case AT_PHDR:
         have_phdr = 1;
@@ -844,11 +982,11 @@ static uint64_t *build_stack(uint64_t stack_top, const struct mapped_elf *exe, c
         break;
       case AT_PHENT:
         have_phent = 1;
-        val = (uint64_t)exe->phentsize;
+        val = (uintptr_t)exe->phentsize;
         break;
       case AT_PHNUM:
         have_phnum = 1;
-        val = (uint64_t)exe->phnum;
+        val = (uintptr_t)exe->phnum;
         break;
       case AT_ENTRY:
         have_entry = 1;
@@ -870,7 +1008,7 @@ static uint64_t *build_stack(uint64_t stack_top, const struct mapped_elf *exe, c
   // Keep this small; the dynamic loader needs these at minimum.
   if (!have_base) {
     auxv_out[out_i++] = AT_BASE;
-    auxv_out[out_i++] = (uint64_t)(uintptr_t)interp->base;
+    auxv_out[out_i++] = (uintptr_t)interp->base;
   }
   if (!have_phdr) {
     auxv_out[out_i++] = AT_PHDR;
@@ -878,11 +1016,11 @@ static uint64_t *build_stack(uint64_t stack_top, const struct mapped_elf *exe, c
   }
   if (!have_phent) {
     auxv_out[out_i++] = AT_PHENT;
-    auxv_out[out_i++] = (uint64_t)exe->phentsize;
+    auxv_out[out_i++] = (uintptr_t)exe->phentsize;
   }
   if (!have_phnum) {
     auxv_out[out_i++] = AT_PHNUM;
-    auxv_out[out_i++] = (uint64_t)exe->phnum;
+    auxv_out[out_i++] = (uintptr_t)exe->phnum;
   }
   if (!have_entry) {
     auxv_out[out_i++] = AT_ENTRY;
@@ -980,11 +1118,11 @@ __attribute__((section(".text._start"), noreturn)) void _start(void) {
   // Allocate a fresh stack with plenty of room to grow.
   size_t stack_sz = 2048u * PAGE_SIZE;
   uint8_t *stack_mapping = (uint8_t *)sys_mmap(NULL, stack_sz, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_GROWSDOWN, -1, 0);
-  if ((uint64_t)stack_mapping > (uint64_t)(-4096)) {
+  if (is_syscall_err_ptr(stack_mapping)) {
     sys_exit_group(129);
   }
 
-  uint64_t stack_top = (uint64_t)(uintptr_t)stack_mapping + (uint64_t)stack_sz - PAGE_SIZE;
+  uintptr_t stack_top = (uintptr_t)stack_mapping + (uintptr_t)stack_sz - PAGE_SIZE;
   // ABI alignment at program entry differs by arch.
 #if defined(__x86_64__)
   // The kernel enters the program/loader with a 16-byte aligned stack. Keep
@@ -994,7 +1132,7 @@ __attribute__((section(".text._start"), noreturn)) void _start(void) {
   stack_top &= ~0xfull; // sp % 16 == 0
 #endif
 
-  uint64_t *new_sp = build_stack(stack_top, &exe, &interp, auxv_buf, auxv_len);
+  uintptr_t *new_sp = build_stack(stack_top, &exe, &interp, auxv_buf, auxv_len);
 
   DBG("stage0: jumping to ld\n");
   jump_with_stack(interp.entry, new_sp);

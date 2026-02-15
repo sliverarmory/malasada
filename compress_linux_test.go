@@ -13,7 +13,7 @@ import (
 )
 
 func TestConvertSharedObject_CompressE2E(t *testing.T) {
-	if runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64" {
+	if runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64" && runtime.GOARCH != "386" {
 		t.Skipf("unsupported GOARCH %q", runtime.GOARCH)
 	}
 	if _, err := exec.LookPath("gcc"); err != nil {

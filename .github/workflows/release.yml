@@ -43,6 +43,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          test -f internal/stage0/stage0_linux_386.bin
           test -f internal/stage0/stage0_linux_amd64.bin
           test -f internal/stage0/stage0_linux_arm64.bin
 
@@ -51,6 +52,7 @@ jobs:
         with:
           name: stage0-bins
           path: |
+            internal/stage0/stage0_linux_386.bin
             internal/stage0/stage0_linux_amd64.bin
             internal/stage0/stage0_linux_arm64.bin
           if-no-files-found: error
@@ -64,7 +66,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        goarch: [amd64, arm64]
+        goarch: [386, amd64, arm64]
     steps:
       - name: Check Out Code
         uses: actions/checkout@v5
@@ -86,17 +88,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -f internal/stage0/stage0_linux_amd64.bin internal/stage0/stage0_linux_arm64.bin
+          rm -f internal/stage0/stage0_linux_386.bin internal/stage0/stage0_linux_amd64.bin internal/stage0/stage0_linux_arm64.bin
 
+          bin_386="$(find .stage0-artifact -type f -name 'stage0_linux_386.bin' -print -quit)"
           bin_amd64="$(find .stage0-artifact -type f -name 'stage0_linux_amd64.bin' -print -quit)"
           bin_arm64="$(find .stage0-artifact -type f -name 'stage0_linux_arm64.bin' -print -quit)"
 
+          test -n "${bin_386}"
           test -n "${bin_amd64}"
           test -n "${bin_arm64}"
 
+          cp "${bin_386}" internal/stage0/stage0_linux_386.bin
           cp "${bin_amd64}" internal/stage0/stage0_linux_amd64.bin
           cp "${bin_arm64}" internal/stage0/stage0_linux_arm64.bin
 
+          test -f internal/stage0/stage0_linux_386.bin
           test -f internal/stage0/stage0_linux_amd64.bin
           test -f internal/stage0/stage0_linux_arm64.bin
 
@@ -150,17 +156,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -f internal/stage0/stage0_linux_amd64.bin internal/stage0/stage0_linux_arm64.bin
+          rm -f internal/stage0/stage0_linux_386.bin internal/stage0/stage0_linux_amd64.bin internal/stage0/stage0_linux_arm64.bin
 
+          bin_386="$(find .stage0-artifact -type f -name 'stage0_linux_386.bin' -print -quit)"
           bin_amd64="$(find .stage0-artifact -type f -name 'stage0_linux_amd64.bin' -print -quit)"
           bin_arm64="$(find .stage0-artifact -type f -name 'stage0_linux_arm64.bin' -print -quit)"
 
+          test -n "${bin_386}"
           test -n "${bin_amd64}"
           test -n "${bin_arm64}"
 
+          cp "${bin_386}" internal/stage0/stage0_linux_386.bin
           cp "${bin_amd64}" internal/stage0/stage0_linux_amd64.bin
           cp "${bin_arm64}" internal/stage0/stage0_linux_arm64.bin
 
+          test -f internal/stage0/stage0_linux_386.bin
           test -f internal/stage0/stage0_linux_amd64.bin
           test -f internal/stage0/stage0_linux_arm64.bin
 
@@ -214,17 +224,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          rm -f internal/stage0/stage0_linux_amd64.bin internal/stage0/stage0_linux_arm64.bin
+          rm -f internal/stage0/stage0_linux_386.bin internal/stage0/stage0_linux_amd64.bin internal/stage0/stage0_linux_arm64.bin
 
+          bin_386="$(find .stage0-artifact -type f -name 'stage0_linux_386.bin' -print -quit)"
           bin_amd64="$(find .stage0-artifact -type f -name 'stage0_linux_amd64.bin' -print -quit)"
           bin_arm64="$(find .stage0-artifact -type f -name 'stage0_linux_arm64.bin' -print -quit)"
 
+          test -n "${bin_386}"
           test -n "${bin_amd64}"
           test -n "${bin_arm64}"
 
+          cp "${bin_386}" internal/stage0/stage0_linux_386.bin
           cp "${bin_amd64}" internal/stage0/stage0_linux_amd64.bin
           cp "${bin_arm64}" internal/stage0/stage0_linux_arm64.bin
 
+          test -f internal/stage0/stage0_linux_386.bin
           test -f internal/stage0/stage0_linux_amd64.bin
           test -f internal/stage0/stage0_linux_arm64.bin
 
@@ -298,4 +312,3 @@ jobs:
               --generate-notes \
               "${release_files[@]}"
           fi
-

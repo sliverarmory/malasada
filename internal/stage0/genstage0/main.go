@@ -56,6 +56,7 @@ func main() {
 		outFile   string
 	}
 	targets := []target{
+		{zigTarget: "x86-linux-gnu", outFile: "stage0_linux_386.bin"},
 		{zigTarget: "x86_64-linux-gnu", outFile: "stage0_linux_amd64.bin"},
 		{zigTarget: "aarch64-linux-gnu", outFile: "stage0_linux_arm64.bin"},
 	}
@@ -72,10 +73,11 @@ func main() {
 		// position-independent so symbol addressing works when the runner mmaps
 		// it at an arbitrary address.
 		//
-		// x86_64 needs explicit PIE flags to avoid absolute symbol immediates.
+		// x86 (32-bit) and x86_64 need explicit PIE flags to avoid absolute
+		// symbol immediates.
 		// aarch64 codegen is already PC-relative for our usage, and forcing PIE
 		// here can introduce relocations we do not apply to the raw blob.
-		if t.zigTarget == "x86_64-linux-gnu" {
+		if t.zigTarget == "x86_64-linux-gnu" || t.zigTarget == "x86-linux-gnu" {
 			args = append(args, "-fpie", "-pie")
 		}
 		if stage0Debug {
