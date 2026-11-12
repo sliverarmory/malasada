@@ -75,7 +75,7 @@
 
 static inline int is_syscall_err_ptr(const void *p);
 
-#if defined(__i386__)
+#if defined(__i386__) || defined(__arm__)
 typedef uint32_t Elf_Addr;
 typedef uint32_t Elf_Off;
 typedef uint16_t Elf_Half;
@@ -318,6 +318,110 @@ static inline void jump_with_stack(uintptr_t dest, uintptr_t *new_stack) {
       : "edx", "memory");
 }
 
+#elif defined(__arm__)
+#define MSDA_ARCH_ID 4u
+
+static inline long sys_call1(long n, long a1) {
+  register long r7 __asm__("r7") = n;
+  register long r0 __asm__("r0") = a1;
+  __asm__ volatile("svc #0" : "+r"(r0) : "r"(r7) : "memory");
+  return r0;
+}
+
+static inline long sys_call2(long n, long a1, long a2) {
+  register long r7 __asm__("r7") = n;
+  register long r0 __asm__("r0") = a1;
+  register long r1 __asm__("r1") = a2;
+  __asm__ volatile("svc #0" : "+r"(r0) : "r"(r7), "r"(r1) : "memory");
+  return r0;
+}
+
+static inline long sys_call3(long n, long a1, long a2, long a3) {
+  register long r7 __asm__("r7") = n;
+  register long r0 __asm__("r0") = a1;
+  register long r1 __asm__("r1") = a2;
+  register long r2 __asm__("r2") = a3;
+  __asm__ volatile("svc #0" : "+r"(r0) : "r"(r7), "r"(r1), "r"(r2) : "memory");
+  return r0;
+}
+
+static inline long sys_call4(long n, long a1, long a2, long a3, long a4) {
+  register long r7 __asm__("r7") = n;
+  register long r0 __asm__("r0") = a1;
+  register long r1 __asm__("r1") = a2;
+  register long r2 __asm__("r2") = a3;
+  register long r3 __asm__("r3") = a4;
+  __asm__ volatile("svc #0" : "+r"(r0) : "r"(r7), "r"(r1), "r"(r2), "r"(r3) : "memory");
+  return r0;
+}
+
+static inline long sys_call6(long n, long a1, long a2, long a3, long a4, long a5, long a6) {
+  register long r7 __asm__("r7") = n;
+  register long r0 __asm__("r0") = a1;
+  register long r1 __asm__("r1") = a2;
+  register long r2 __asm__("r2") = a3;
+  register long r3 __asm__("r3") = a4;
+  register long r4 __asm__("r4") = a5;
+  register long r5 __asm__("r5") = a6;
+  __asm__ volatile("svc #0" : "+r"(r0) : "r"(r7), "r"(r1), "r"(r2), "r"(r3), "r"(r4), "r"(r5) : "memory");
+  return r0;
+}
+
+// syscall numbers (arm EABI)
+#define __NR_read       3
+#define __NR_write      4
+#define __NR_close      6
+#define __NR_lseek      19
+#define __NR_mprotect   125
+#define __NR_munmap     91
+#define __NR_openat     322
+#define __NR_exit_group 248
+
+// ARM uses __NR_mmap2 (192) which takes a page-offset, not a byte offset.
+#define __NR_mmap2 192
+
+static inline void *sys_mmap(void *addr, size_t len, int prot, int flags, int fd, uint64_t off) {
+  if (off & (PAGE_SIZE - 1)) {
+    return (void *)(long)-22; // -EINVAL: offset must be page-aligned
+  }
+  unsigned long pgoff = (unsigned long)(off / PAGE_SIZE);
+  return (void *)sys_call6(__NR_mmap2, (long)addr, (long)len, prot, flags, fd, (long)pgoff);
+}
+
+static inline long sys_mprotect(void *addr, size_t len, int prot) { return sys_call3(__NR_mprotect, (long)addr, (long)len, prot); }
+static inline long sys_munmap(void *addr, size_t len) { return sys_call2(__NR_munmap, (long)addr, (long)len); }
+static inline long sys_openat(int dirfd, const char *path, int flags, int mode) {
+  return sys_call4(__NR_openat, (long)dirfd, (long)path, flags, mode);
+}
+static inline long sys_read(int fd, void *buf, size_t len) { return sys_call3(__NR_read, fd, (long)buf, (long)len); }
+static inline long sys_write(int fd, const void *buf, size_t len) { return sys_call3(__NR_write, fd, (long)buf, (long)len); }
+static inline long sys_close(int fd) { return sys_call1(__NR_close, fd); }
+static inline long sys_lseek(int fd, long off, int whence) { return sys_call3(__NR_lseek, fd, off, whence); }
+
+__attribute__((noreturn)) static inline void sys_exit_group(int code) {
+  (void)sys_call1(__NR_exit_group, code);
+  for (;;) {
+  }
+}
+
+static inline void jump_with_stack(uintptr_t dest, uintptr_t *new_stack) {
+  __asm__ volatile(
+      "mov sp, %[stack]\n"
+      "mov r0, #0\n"
+      "bx %[entry]\n"
+      :
+      : [stack] "r"(new_stack), [entry] "r"(dest)
+      : "r0", "memory");
+}
+
+static inline void clear_cache(void *start, void *end) {
+  register long r0 __asm__("r0") = (long)start;
+  register long r1 __asm__("r1") = (long)end;
+  register long r2 __asm__("r2") = 0;
+  register long r7 __asm__("r7") = 0xf0002; // __ARM_NR_cacheflush
+  __asm__ volatile("svc #0" : "+r"(r0) : "r"(r1), "r"(r2), "r"(r7) : "memory");
+}
+
 #elif defined(__aarch64__)
 #define MSDA_ARCH_ID 2u
 
@@ -382,11 +486,21 @@ static inline void jump_with_stack(uintptr_t dest, uintptr_t *new_stack) {
 }
 
 static inline void clear_cache(void *start, void *end) {
-  __builtin___clear_cache((char *)start, (char *)end);
+  uintptr_t p = (uintptr_t)start & ~63UL;
+  uintptr_t e = (uintptr_t)end;
+  for (; p < e; p += 64) {
+    __asm__ volatile("dc civac, %0" : : "r"(p) : "memory");
+  }
+  __asm__ volatile("dsb ish" ::: "memory");
+  p = (uintptr_t)start & ~63UL;
+  for (; p < e; p += 64) {
+    __asm__ volatile("ic ivau, %0" : : "r"(p) : "memory");
+  }
+  __asm__ volatile("dsb ish\nisb" ::: "memory");
 }
 
 #else
-#error "Unsupported architecture (stage0 supports linux amd64, arm64, and 386 only)"
+#error "Unsupported architecture (stage0 supports linux amd64, arm64, arm, and 386 only)"
 #endif
 
 // -----------------------------
@@ -426,6 +540,9 @@ __attribute__((section(".text"), aligned(1))) static const char path_ld_linux_al
 #elif defined(__i386__)
 __attribute__((section(".text"), aligned(1))) static const char path_ld_linux[] = "/lib/ld-linux.so.2";
 __attribute__((section(".text"), aligned(1))) static const char path_ld_linux_alt[] = "/lib/i386-linux-gnu/ld-linux.so.2";
+#elif defined(__arm__)
+__attribute__((section(".text"), aligned(1))) static const char path_ld_linux[] = "/lib/ld-linux-armhf.so.3";
+__attribute__((section(".text"), aligned(1))) static const char path_ld_linux_alt[] = "/lib/arm-linux-gnueabihf/ld-linux-armhf.so.3";
 #endif
 
 // -----------------------------
@@ -878,7 +995,7 @@ static int map_elf(const uint8_t *data, uint64_t data_len, struct mapped_elf *ou
     }
   }
 
-#if defined(__aarch64__)
+#if defined(__aarch64__) || defined(__arm__)
   // We wrote instructions into memory; make sure I-cache sees it.
   clear_cache(mapping, mapping + map_sz);
 #endif

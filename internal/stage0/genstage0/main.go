@@ -59,6 +59,7 @@ func main() {
 		{zigTarget: "x86-linux-gnu", outFile: "stage0_linux_386.bin"},
 		{zigTarget: "x86_64-linux-gnu", outFile: "stage0_linux_amd64.bin"},
 		{zigTarget: "aarch64-linux-gnu", outFile: "stage0_linux_arm64.bin"},
+		{zigTarget: "arm-linux-gnueabihf", outFile: "stage0_linux_arm.bin"},
 	}
 
 	for _, t := range targets {
@@ -77,7 +78,7 @@ func main() {
 		// symbol immediates.
 		// aarch64 codegen is already PC-relative for our usage, and forcing PIE
 		// here can introduce relocations we do not apply to the raw blob.
-		if t.zigTarget == "x86_64-linux-gnu" || t.zigTarget == "x86-linux-gnu" {
+		if t.zigTarget == "x86_64-linux-gnu" || t.zigTarget == "x86-linux-gnu" || t.zigTarget == "arm-linux-gnueabihf" {
 			args = append(args, "-fpie", "-pie")
 		}
 		if stage0Debug {

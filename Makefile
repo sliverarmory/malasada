@@ -10,7 +10,7 @@ endif
 
 OUT ?= malasada$(EXE)
 
-STAGE0_BINS := internal/stage0/stage0_linux_386.bin internal/stage0/stage0_linux_amd64.bin internal/stage0/stage0_linux_arm64.bin
+STAGE0_BINS := internal/stage0/stage0_linux_386.bin internal/stage0/stage0_linux_amd64.bin internal/stage0/stage0_linux_arm64.bin internal/stage0/stage0_linux_arm.bin
 
 .PHONY: all build test clean stage0 check-stage0 docker-test-386
 

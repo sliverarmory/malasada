@@ -29,4 +29,13 @@ func TestStubs_GoldenBytes(t *testing.T) {
 	if got := hex.EncodeToString(gotARM64); got != wantARM64 {
 		t.Fatalf("arm64 stub mismatch:\nwant %s\ngot  %s", wantARM64, got)
 	}
+
+	gotARM, err := makeStubARM(stubVaddr, exportVaddr, []uint64{initVaddr, 0})
+	if err != nil {
+		t.Fatalf("makeStubARM: %v", err)
+	}
+	wantARM := "08404fe24058a0e3054044e000509de504608de2017085e20771a0e107708de0047087e20500a0e10610a0e10720a0e17830a0e3563c83e3043083e00fe0a0e103f0a0e15630a0e3343c83e3123883e3043083e00fe0a0e103f0a0e1f870a0e30000a0e3000000ef"
+	if got := hex.EncodeToString(gotARM); got != wantARM {
+		t.Fatalf("arm stub mismatch:\nwant %s\ngot  %s", wantARM, got)
+	}
 }
