@@ -158,11 +158,62 @@ func TestPatchSOToCallExport_Linux386(t *testing.T) {
 	}
 }
 
+func TestPatchSOToCallExport_LinuxARM(t *testing.T) {
+	so := buildHelloSO(t, ArchLinuxARM)
+	arch, patched, err := patchSOToCallExport(so, "Hello")
+	if err != nil {
+		t.Fatalf("patch: %v", err)
+	}
+	if arch != ArchLinuxARM {
+		t.Fatalf("arch mismatch: %v", arch)
+	}
+
+	h, err := parseELF32Header(patched)
+	if err != nil {
+		t.Fatalf("parse patched header: %v", err)
+	}
+	if h.entry == 0 {
+		t.Fatalf("expected non-zero e_entry")
+	}
+
+	phdrs, err := parseELF32Phdrs(patched, h)
+	if err != nil {
+		t.Fatalf("parse phdrs: %v", err)
+	}
+	var found bool
+	for _, ph := range phdrs {
+		if ph.typ != ptLoad {
+			continue
+		}
+		if ph.vaddr != h.entry {
+			continue
+		}
+		if ph.flags&(pfR|pfX) != (pfR | pfX) {
+			t.Fatalf("stub segment missing R|X flags: 0x%x", ph.flags)
+		}
+		if uint64(ph.off)+uint64(ph.filesz) > uint64(len(patched)) {
+			t.Fatalf("stub segment outside file")
+		}
+		start := int(ph.off)
+		end := start + int(ph.filesz)
+		stub := patched[start:end]
+		// First ARM instruction: adr r4, stub_start => sub r4, pc, #8 => 0xE24F4008
+		if len(stub) < 4 || !bytes.Equal(stub[:4], []byte{0x08, 0x40, 0x4f, 0xe2}) {
+			t.Fatalf("arm stub prefix mismatch: %x", stub[:min(8, len(stub))])
+		}
+		found = true
+		break
+	}
+	if !found {
+		t.Fatalf("did not find stub PT_LOAD segment at entry")
+	}
+}
+
 func TestStage0HeaderAtEnd(t *testing.T) {
 	t.Setenv("ZIG_GLOBAL_CACHE_DIR", filepath.Join(t.TempDir(), "zig-cache"))
 	t.Setenv("ZIG_LOCAL_CACHE_DIR", filepath.Join(t.TempDir(), "zig-cache-local"))
 
-	for _, arch := range []Arch{ArchLinuxAMD64, ArchLinuxARM64, ArchLinux386} {
+	for _, arch := range []Arch{ArchLinuxAMD64, ArchLinuxARM64, ArchLinux386, ArchLinuxARM} {
 		stage0, err := buildStage0(arch)
 		if err != nil {
 			t.Fatalf("buildStage0(%v): %v", arch, err)
@@ -184,6 +235,8 @@ func TestStage0HeaderAtEnd(t *testing.T) {
 			wantArchID = 2
 		case ArchLinux386:
 			wantArchID = 3
+		case ArchLinuxARM:
+			wantArchID = 4
 		default:
 			t.Fatalf("unsupported arch %v", arch)
 		}
@@ -232,6 +285,10 @@ func buildHelloSO(t *testing.T, arch Arch) []byte {
 		goarch = "386"
 		zigTarget = "x86-linux-gnu"
 		machineWant = elf.EM_386
+	case ArchLinuxARM:
+		goarch = "arm"
+		zigTarget = "arm-linux-gnueabihf"
+		machineWant = elf.EM_ARM
 	default:
 		t.Fatalf("unsupported arch %v", arch)
 	}
@@ -239,11 +296,15 @@ func buildHelloSO(t *testing.T, arch Arch) []byte {
 	soPath := filepath.Join(tmp, "hello.so")
 
 	cmd := exec.Command("go", "build", "-buildmode=c-shared", "-o", soPath, "./testdata/hello")
-	cmd.Env = append(os.Environ(),
+	env := append(os.Environ(),
 		"CGO_ENABLED=1",
 		"GOOS="+goos,
 		"GOARCH="+goarch,
 	)
+	if goarch == "arm" {
+		env = append(env, "GOARM=7")
+	}
+	cmd.Env = env
 	// On linux, prefer native builds (no Zig dependency) for the current arch.
 	// For cross-arch builds, fall back to Zig if available; otherwise skip.
 	if !(runtime.GOOS == "linux" && runtime.GOARCH == goarch) {

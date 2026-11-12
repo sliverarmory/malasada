@@ -23,6 +23,7 @@ const (
 	ArchLinuxAMD64
 	ArchLinuxARM64
 	ArchLinux386
+	ArchLinuxARM
 )
 
 func (a Arch) String() string {
@@ -33,6 +34,8 @@ func (a Arch) String() string {
 		return "linux/arm64"
 	case ArchLinux386:
 		return "linux/386"
+	case ArchLinuxARM:
+		return "linux/arm"
 	default:
 		return "unknown"
 	}
@@ -46,6 +49,8 @@ func archFromELFMachine(m elf.Machine) (Arch, error) {
 		return ArchLinuxARM64, nil
 	case elf.EM_386:
 		return ArchLinux386, nil
+	case elf.EM_ARM:
+		return ArchLinuxARM, nil
 	default:
 		return ArchUnknown, fmt.Errorf("unsupported ELF machine %v", m)
 	}
@@ -161,6 +166,9 @@ var stage0LinuxARM64Prebuilt []byte
 //go:embed internal/stage0/stage0_linux_386.bin
 var stage0Linux386Prebuilt []byte
 
+//go:embed internal/stage0/stage0_linux_arm.bin
+var stage0LinuxARMPrebuilt []byte
+
 func patchStage0PayloadLen(stage0 []byte, payloadLen uint64) error {
 	// The stage0 linker script forces the msda header to the end of the extracted
 	// .text. We enforce that invariant so we can append the payload bytes directly
@@ -176,7 +184,7 @@ func patchStage0PayloadLen(stage0 []byte, payloadLen uint64) error {
 		return fmt.Errorf("stage0 has unexpected msda version")
 	}
 	arch := binary.LittleEndian.Uint32(hdr[12:16])
-	if arch != 1 && arch != 2 && arch != 3 {
+	if arch != 1 && arch != 2 && arch != 3 && arch != 4 {
 		return fmt.Errorf("stage0 has unexpected msda arch")
 	}
 
@@ -199,6 +207,8 @@ func buildStage0(arch Arch) ([]byte, error) {
 		prebuilt = stage0LinuxARM64Prebuilt
 	case ArchLinux386:
 		prebuilt = stage0Linux386Prebuilt
+	case ArchLinuxARM:
+		prebuilt = stage0LinuxARMPrebuilt
 	default:
 		return nil, fmt.Errorf("unsupported arch %v", arch)
 	}
@@ -794,7 +804,7 @@ func patchSOToCallExport64(so []byte, arch Arch, machine elf.Machine, exportVadd
 }
 
 func patchSOToCallExport32(so []byte, arch Arch, machine elf.Machine, exportVaddr uint64) (Arch, []byte, error) {
-	if arch != ArchLinux386 {
+	if arch != ArchLinux386 && arch != ArchLinuxARM {
 		return ArchUnknown, nil, fmt.Errorf("unsupported 32-bit arch %v", arch)
 	}
 
@@ -938,7 +948,15 @@ func patchSOToCallExport32(so []byte, arch Arch, machine elf.Machine, exportVadd
 
 	// Add a PT_INTERP string (within the stub PT_LOAD) so glibc ld-linux treats
 	// the payload like a normal executable (needed for some rtld invariants).
-	interpPath := "/lib/ld-linux.so.2"
+	interpPath := ""
+	switch arch {
+	case ArchLinux386:
+		interpPath = "/lib/ld-linux.so.2"
+	case ArchLinuxARM:
+		interpPath = "/lib/ld-linux-armhf.so.3"
+	default:
+		return ArchUnknown, nil, fmt.Errorf("unsupported 32-bit arch %v for interp", arch)
+	}
 	interpStr := append([]byte(interpPath), 0)
 	interpFileOff := uint64(len(so2))
 	interpVaddr := stubVaddr + uint64(len(stub))
@@ -1275,6 +1293,8 @@ func makeEntryStub(arch Arch, stubVaddr uint64, exportVaddr uint64, initVaddrs [
 		return makeStubARM64(stubVaddr, exportVaddr, initVaddrs)
 	case ArchLinux386:
 		return makeStub386(stubVaddr, exportVaddr, initVaddrs)
+	case ArchLinuxARM:
+		return makeStubARM(stubVaddr, exportVaddr, initVaddrs)
 	default:
 		return nil, fmt.Errorf("unsupported arch %v", arch)
 	}
@@ -1353,6 +1373,100 @@ func makeStub386(stubVaddr uint64, exportVaddr uint64, initVaddrs []uint64) ([]b
 	if err := engine.Option(keystone.OPT_SYNTAX, keystone.OPT_SYNTAX_INTEL); err != nil {
 		return nil, err
 	}
+	return engine.Assemble(sb.String(), 0)
+}
+
+func makeStubARM(stubVaddr uint64, exportVaddr uint64, initVaddrs []uint64) ([]byte, error) {
+	const maxU32 = uint64(^uint32(0))
+	if stubVaddr > maxU32 || exportVaddr > maxU32 {
+		return nil, fmt.Errorf("vaddr too large for ARM32")
+	}
+	for _, vaddr := range initVaddrs {
+		if vaddr > maxU32 {
+			return nil, fmt.Errorf("init vaddr too large for ARM32")
+		}
+	}
+
+	// Load a 32-bit immediate using mov + orr with rotated 8-bit immediates.
+	// ARM data-processing immediates encode as (8-bit value) ROR (even shift).
+	// Decompose into up to 4 byte-sized pieces.
+	loadImm32 := func(sb *strings.Builder, reg string, val uint32) {
+		if val == 0 {
+			fmt.Fprintf(sb, "mov %s, #0\n", reg)
+			return
+		}
+		type part struct {
+			imm uint32
+			ror int
+		}
+		var parts []part
+		// Extract each non-zero byte: byte k sits at bits [8k+7 : 8k],
+		// which is the raw byte rotated right by (32 - 8*k) mod 32.
+		rors := [4]int{0, 24, 16, 8}
+		for k := 0; k < 4; k++ {
+			b := (val >> (8 * k)) & 0xFF
+			if b != 0 {
+				parts = append(parts, part{b, rors[k]})
+			}
+		}
+		fmt.Fprintf(sb, "mov %s, #0x%X, #%d\n", reg, parts[0].imm, parts[0].ror)
+		for _, p := range parts[1:] {
+			fmt.Fprintf(sb, "orr %s, %s, #0x%X, #%d\n", reg, reg, p.imm, p.ror)
+		}
+	}
+
+	// ARM32 entry stub (ARM mode, not Thumb).
+	// r4 = module base (PC-relative computation)
+	// r5 = argc, r6 = argv, r7 = envp (saved for init calls)
+	var sb strings.Builder
+
+	// Compute base: adr r4, stub_start gives PC of stub_start.
+	// base = r4 - stub_vaddr
+	sb.WriteString("stub_start:\n")
+	sb.WriteString("adr r4, stub_start\n")
+	loadImm32(&sb, "r5", uint32(stubVaddr))
+	sb.WriteString("sub r4, r4, r5\n")
+
+	// Compute (argc, argv, envp) from the entry stack.
+	// sp[0] = argc, sp[4] = argv[0], envp = &argv[argc+1]
+	sb.WriteString("ldr r5, [sp]\n")
+	sb.WriteString("add r6, sp, #4\n")
+	sb.WriteString("add r7, r5, #1\n")
+	sb.WriteString("lsl r7, r7, #2\n")
+	sb.WriteString("add r7, sp, r7\n")
+	sb.WriteString("add r7, r7, #4\n")
+
+	// Call init functions (DT_PREINIT_ARRAY/DT_INIT/DT_INIT_ARRAY).
+	// AAPCS: r0=argc, r1=argv, r2=envp
+	for _, vaddr := range initVaddrs {
+		if vaddr == 0 {
+			continue
+		}
+		sb.WriteString("mov r0, r5\n")
+		sb.WriteString("mov r1, r6\n")
+		sb.WriteString("mov r2, r7\n")
+		loadImm32(&sb, "r3", uint32(vaddr))
+		sb.WriteString("add r3, r3, r4\n")
+		sb.WriteString("mov lr, pc\n")
+		sb.WriteString("mov pc, r3\n")
+	}
+
+	// Call the requested export (no args).
+	loadImm32(&sb, "r3", uint32(exportVaddr))
+	sb.WriteString("add r3, r3, r4\n")
+	sb.WriteString("mov lr, pc\n")
+	sb.WriteString("mov pc, r3\n")
+
+	// exit_group(0): r7 = __NR_exit_group (248), r0 = 0
+	sb.WriteString("mov r7, #248\n")
+	sb.WriteString("mov r0, #0\n")
+	sb.WriteString("svc #0\n")
+
+	engine, err := keystone.NewEngine(keystone.ARCH_ARM, keystone.MODE_ARM)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = engine.Close() }()
 	return engine.Assemble(sb.String(), 0)
 }
 
